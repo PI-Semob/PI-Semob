@@ -1,9 +1,10 @@
 import os
 from dotenv import load_dotenv
+from pymongo import MongoClient
 
 load_dotenv()
 
-def obter_conexao():
-    db_url = os.getenv("DATABASE_URL", "sqlite:///./app.db")
-    print(f"Conectando ao banco em: {db_url}")
-    return db_url
+MONGO_URI = os.getenv("MONGO_URI")
+DB_NAME = os.getenv("DB_NAME")
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
