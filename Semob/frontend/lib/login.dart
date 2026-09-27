@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import 'auth_service.dart';
 import 'cadastro.dart';
 
 class LoginPage extends StatefulWidget {
@@ -14,9 +16,13 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   // Permite verificar os campos do formulário.
   final chaveFormulario = GlobalKey<FormState>();
+  final controladorEmail = TextEditingController();
+  final controladorSenha = TextEditingController();
+  final authService = AuthService();
 
   // A senha começa escondida.
   bool esconderSenha = true;
+  bool enviando = false;
 
   void mostrarMensagem(String mensagem) {
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -26,7 +32,11 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
-  void entrar() {
+  Future<void> entrar() async {
+    if (enviando) {
+      return;
+    }
+
     if (!chaveFormulario.currentState!.validate()) {
       return;
     }
@@ -34,10 +44,36 @@ class _LoginPageState extends State<LoginPage> {
     // Fecha o teclado.
     FocusScope.of(context).unfocus();
 
-    // O login ainda precisa ser conectado ao servidor.
-    mostrarMensagem(
-      'O acesso estará disponível após a integração com o servidor.',
-    );
+    setState(() {
+      enviando = true;
+    });
+
+    try {
+      final mensagem = await authService.login(
+        email: controladorEmail.text.trim(),
+        senha: controladorSenha.text,
+      );
+      if (mounted) {
+        mostrarMensagem(mensagem);
+      }
+    } on AuthException catch (erro) {
+      if (mounted) {
+        mostrarMensagem(erro.mensagem);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          enviando = false;
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    controladorEmail.dispose();
+    controladorSenha.dispose();
+    super.dispose();
   }
 
   // Aparência usada nos campos de e-mail e senha.
@@ -223,6 +259,7 @@ class _LoginPageState extends State<LoginPage> {
                           ),
                         ),
                         TextFormField(
+                          controller: controladorEmail,
                           keyboardType: TextInputType.emailAddress,
                           textInputAction: TextInputAction.next,
                           autofillHints: const [AutofillHints.username],
@@ -267,13 +304,16 @@ class _LoginPageState extends State<LoginPage> {
                           ),
                         ),
                         TextFormField(
+                          controller: controladorSenha,
                           obscureText: esconderSenha,
                           enableSuggestions: false,
                           autocorrect: false,
                           autofillHints: const [AutofillHints.password],
                           textInputAction: TextInputAction.done,
                           onFieldSubmitted: (valor) {
-                            entrar();
+                            if (!enviando) {
+                              entrar();
+                            }
                           },
                           style: const TextStyle(
                             color: Color(0xFF172554),
@@ -336,9 +376,10 @@ class _LoginPageState extends State<LoginPage> {
 
                         // Botão de entrada.
                         ElevatedButton(
-                          onPressed: entrar,
+                          onPressed: enviando ? null : entrar,
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFF005BBB),
+                            disabledBackgroundColor: const Color(0xFF005BBB),
                             foregroundColor: Colors.white,
                             minimumSize: const Size.fromHeight(56),
                             elevation: 5,
@@ -347,13 +388,22 @@ class _LoginPageState extends State<LoginPage> {
                               borderRadius: BorderRadius.circular(12),
                             ),
                           ),
-                          child: const Text(
-                            'Entrar',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
+                          child: enviando
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Text(
+                                  'Entrar',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
                         ),
 
                         const SizedBox(height: 12),

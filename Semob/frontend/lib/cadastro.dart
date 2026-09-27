@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'auth_service.dart';
+
 class CadastroPage extends StatefulWidget {
   const CadastroPage({super.key});
 
@@ -10,6 +12,8 @@ class CadastroPage extends StatefulWidget {
 }
 
 class _CadastroPageState extends State<CadastroPage> {
+  final authService = AuthService();
+
   // Cada variavel guarda o que foi digitado em um campo.
   String nome = '';
   String cpf = '';
@@ -19,6 +23,7 @@ class _CadastroPageState extends State<CadastroPage> {
   bool esconderSenha = true;
   bool esconderConfirmacao = true;
   bool aceitouTermos = false;
+  bool enviando = false;
   String senha = '';
 
   void mostrarMensagem(String mensagem) {
@@ -28,7 +33,11 @@ class _CadastroPageState extends State<CadastroPage> {
     );
   }
 
-  void cadastrar() {
+  Future<void> cadastrar() async {
+    if (enviando) {
+      return;
+    }
+
     // Aceita CPF e celular com ou sem pontuacao.
     String cpfNumeros =
         cpf.replaceAll('.', '').replaceAll('-', '').replaceAll(' ', '');
@@ -79,8 +88,33 @@ class _CadastroPageState extends State<CadastroPage> {
       return;
     }
     FocusScope.of(context).unfocus();
-    mostrarMensagem(
-        'O cadastro estará disponível após a integração com o servidor.');
+
+    setState(() {
+      enviando = true;
+    });
+
+    try {
+      final mensagem = await authService.cadastrar(
+        nome: nome.trim(),
+        cpf: cpfNumeros,
+        email: email.trim(),
+        celular: celularNumeros,
+        senha: senha,
+      );
+      if (mounted) {
+        mostrarMensagem(mensagem);
+      }
+    } on AuthException catch (erro) {
+      if (mounted) {
+        mostrarMensagem(erro.mensagem);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          enviando = false;
+        });
+      }
+    }
   }
 
   @override
@@ -382,7 +416,9 @@ class _CadastroPageState extends State<CadastroPage> {
                     enableSuggestions: false,
                     textInputAction: TextInputAction.done,
                     onSubmitted: (valor) {
-                      cadastrar();
+                      if (!enviando) {
+                        cadastrar();
+                      }
                     },
                     style:
                         const TextStyle(fontSize: 14, color: Color(0xFF172554)),
@@ -466,9 +502,10 @@ class _CadastroPageState extends State<CadastroPage> {
                   ),
                   const SizedBox(height: 20),
                   ElevatedButton(
-                    onPressed: cadastrar,
+                    onPressed: enviando ? null : cadastrar,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF005BBB),
+                      disabledBackgroundColor: const Color(0xFF005BBB),
                       foregroundColor: Colors.white,
                       minimumSize: const Size.fromHeight(56),
                       elevation: 5,
@@ -476,9 +513,18 @@ class _CadastroPageState extends State<CadastroPage> {
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12)),
                     ),
-                    child: const Text('Cadastrar',
-                        style: TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w700)),
+                    child: enviando
+                        ? const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text('Cadastrar',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w700)),
                   ),
                   const SizedBox(height: 8),
                   Wrap(
