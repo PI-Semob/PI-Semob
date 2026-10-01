@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import 'login.dart';
 
 void main() {
@@ -11,15 +12,11 @@ class MeuApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'SEMOB — Mobilidade Urbana',
+      title: 'SEMOB - Mobilidade Urbana',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        useMaterial3: true,
         scaffoldBackgroundColor: Colors.white,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF005BBB),
-          brightness: Brightness.light,
-        ),
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF005BBB)),
       ),
       home: const LoginPage(),
     );
