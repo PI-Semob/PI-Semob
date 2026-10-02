@@ -15,7 +15,7 @@ class MeuApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        scaffoldBackgroundColor: Colors.white,
+        scaffoldBackgroundColor: Color(0xFFDFE9F5),
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF005BBB),
           brightness: Brightness.light,
