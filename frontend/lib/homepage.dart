@@ -68,7 +68,7 @@ class HomePage extends StatelessWidget {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.fromLTRB(16, 30, 16, 16),
                 child: Center(
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(
@@ -78,28 +78,29 @@ class HomePage extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'Dashboard',
+                          'Gerencie seu dashboard',
                           style: TextStyle(
-                            fontSize: 32,
+                            fontSize: 24,
                             fontWeight: FontWeight.bold,
-                            color: Color(0xFF173F68),
+                            color: Color(0xFF172554),
                           ),
                         ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 8),
                         const Text(
-                          'Visualize e acompanhe os dados da operação do transporte público',
+                          'Tenha os principais dados da operação do transporte público em um só lugar.',
                           style: TextStyle(
-                            fontSize: 16,
+                            fontSize: 14,
                             color: Color(0xFF667D95),
+                            height: 1.4,
                           ),
                         ),
-                        const SizedBox(height: 24),
+                        const SizedBox(height: 27),
                         CustomPaint(
                           foregroundPainter: DashedBorderPainter(),
                           child: Container(
                             width: double.infinity,
                             constraints: const BoxConstraints(
-                              minHeight: 420,
+                              minHeight: 290,
                             ),
                             padding: const EdgeInsets.all(24),
                             decoration: BoxDecoration(
@@ -109,35 +110,30 @@ class HomePage extends StatelessWidget {
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                const CircleAvatar(
-                                  radius: 36,
-                                  backgroundColor: Color(0xFFEAF4FC),
-                                  child: Icon(
-                                    Icons.cloud_upload_outlined,
-                                    size: 38,
-                                    color: Color(0xFF1976B9),
-                                  ),
+                                const Icon(
+                                  Icons.cloud_upload_outlined,
+                                  size: 42,
+                                  color: Color(0xFF1976B9),
                                 ),
-                                const SizedBox(height: 24),
+                                const SizedBox(height: 18),
                                 const Text(
                                   'Arraste seu dashboard aqui',
                                   textAlign: TextAlign.center,
                                   style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFF173F68),
+                                    fontSize: 19,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF172554),
                                   ),
                                 ),
-                                const SizedBox(height: 10),
+                                const SizedBox(height: 8),
                                 const Text(
-                                  'ou selecione um arquivo do seu computador',
-                                  textAlign: TextAlign.center,
+                                  'ou',
                                   style: TextStyle(
-                                    fontSize: 16,
+                                    fontSize: 14,
                                     color: Color(0xFF667D95),
                                   ),
                                 ),
-                                const SizedBox(height: 24),
+                                const SizedBox(height: 12),
                                 ElevatedButton.icon(
                                   onPressed: () {
                                     ScaffoldMessenger.of(context).showSnackBar(
@@ -150,16 +146,15 @@ class HomePage extends StatelessWidget {
                                   },
                                   icon: const Icon(
                                     Icons.folder_open_outlined,
+                                    size: 20,
                                   ),
-                                  label: const Text(
-                                    'Selecionar arquivo',
-                                  ),
+                                  label: const Text('Selecionar arquivo'),
                                   style: ElevatedButton.styleFrom(
                                     backgroundColor: const Color(0xFF1976B9),
                                     foregroundColor: Colors.white,
                                     padding: const EdgeInsets.symmetric(
-                                      horizontal: 20,
-                                      vertical: 16,
+                                      horizontal: 18,
+                                      vertical: 14,
                                     ),
                                     shape: RoundedRectangleBorder(
                                       borderRadius: BorderRadius.circular(9),
@@ -176,8 +171,8 @@ class HomePage extends StatelessWidget {
                             'ⓘ Formatos aceitos: PDF, PNG ou JPG · Tamanho máximo: 20 MB',
                             textAlign: TextAlign.center,
                             style: TextStyle(
-                              fontSize: 13,
-                              color: Color(0xFF8093A8),
+                              fontSize: 11,
+                              color: Color(0xFF667D95),
                             ),
                           ),
                         ),

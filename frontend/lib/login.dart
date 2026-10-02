@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'homepage.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -21,8 +22,11 @@ class _LoginPageState extends State<LoginPage> {
 
   void entrar() {
     if (chaveFormulario.currentState!.validate()) {
-      mostrarMensagem(
-        'O acesso estará disponível após a integração com o servidor.',
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (context) => const HomePage(),
+        ),
       );
     }
   }
