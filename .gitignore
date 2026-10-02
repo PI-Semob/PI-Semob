@@ -1,0 +1,12 @@
+# backend
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# frontend
+frontend/.metadata
+.dart_tool/
+build/
+.idea/
+*.iml
