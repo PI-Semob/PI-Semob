@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'login.dart';
+import 'homepage.dart';
 
 void main() {
   runApp(const MeuApp());
@@ -21,7 +21,7 @@ class MeuApp extends StatelessWidget {
           brightness: Brightness.light,
         ),
       ),
-      home: const LoginPage(),
+      home: const HomePage(),
     );
   }
 }
