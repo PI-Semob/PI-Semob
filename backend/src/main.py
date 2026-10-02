@@ -1,6 +1,11 @@
+import io
+import json
 import re
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, status
+import pandas as pd
+from bs4 import BeautifulSoup
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -22,12 +27,13 @@ app.add_middleware(
 )
 
 colecao_usuarios = db["usuarios"]
+colecao_relatorios_mensais = db["relatorios_mensais"]
 password_hash = PasswordHash.recommended()
 PADRAO_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 @app.exception_handler(RequestValidationError)
-async def tratar_erro_validacao(_request: Request, _erro: RequestValidationError):
+async def tratar_erro_validacao(request: Request, erro: RequestValidationError):
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={"detail": "Dados inválidos"},
@@ -173,3 +179,322 @@ def listar_usuarios():
         ) from erro
 
     return [formatar_usuario(usuario) for usuario in usuarios]
+
+def ler_tabelas(arquivo):
+    if hasattr(arquivo, "read"):
+        conteudo_html = arquivo.read()
+        if isinstance(conteudo_html, bytes):
+            conteudo_html = conteudo_html.decode("cp1252")
+    elif isinstance(arquivo, Path) or (isinstance(arquivo, str) and "<" not in arquivo):
+        conteudo_html = Path(arquivo).read_bytes().decode("cp1252")
+    else:
+        conteudo_html = arquivo
+
+    tabelas = pd.read_html(io.StringIO(conteudo_html), encoding="cp1252")
+    tabelas = [
+        tabela
+        for tabela in tabelas
+        if len(tabela.columns) > 1
+        and not str(tabela.columns[0]).startswith("SmartDataSource")
+    ]
+    if not tabelas:
+        return []
+    soup = BeautifulSoup(conteudo_html, "html.parser")
+    cabecalhos_tabelas = []
+    for tabela_html in soup.find_all("table", class_="data"):
+        cabecalhos = [celula.get_text(" ", strip=True) for celula in tabela_html.find_all("th")]
+        if cabecalhos and not cabecalhos[0].startswith("SmartDataSource"):
+            cabecalhos_tabelas.append(cabecalhos)
+    for tabela, cabecalhos in zip(tabelas, cabecalhos_tabelas):
+        if len(cabecalhos) == len(tabela.columns):
+            tabela.columns = cabecalhos
+    return tabelas
+
+
+def ler_tabela(arquivo):
+    tabelas = ler_tabelas(arquivo)
+    return max(tabelas, key=len) if tabelas else pd.DataFrame()
+
+
+def normalizar_valor_numerico(valor):
+    if pd.isna(valor) or isinstance(valor, (int, float)):
+        return valor
+    texto = str(valor).strip().replace(" ", "")
+    if "," in texto and "." in texto:
+        return texto.replace(".", "").replace(",", ".")
+    if "," in texto:
+        return texto.replace(",", ".")
+    return texto
+
+
+def padronizar(arquivo, mapeamento, inteiros=(), decimais=(), datas=()):
+    tabela = arquivo.copy() if isinstance(arquivo, pd.DataFrame) else ler_tabela(arquivo).copy()
+    tabela.columns = [str(coluna).strip() for coluna in tabela.columns]
+    tabela = tabela.rename(columns=mapeamento)
+
+    for coluna in inteiros:
+        if coluna in tabela.columns:
+            valores = tabela[coluna].map(normalizar_valor_numerico)
+            tabela[coluna] = pd.to_numeric(valores, errors="coerce").fillna(0).astype("int64")
+
+    for coluna in decimais:
+        if coluna in tabela.columns:
+            valores = tabela[coluna].map(normalizar_valor_numerico)
+            tabela[coluna] = pd.to_numeric(valores, errors="coerce").fillna(0.0)
+
+    for coluna in datas:
+        if coluna in tabela.columns:
+            tabela[coluna] = pd.to_datetime(tabela[coluna], dayfirst=True, errors="coerce")
+    return tabela
+
+
+def tratar_fcv(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "manha_p": "manha_programadas", 
+        "manha_r": "manha_realizadas",
+        "tarde_p": "tarde_programadas", 
+        "tarde_r": "tarde_realizadas",
+        "noite_p": "noite_programadas", 
+        "noite_r": "noite_realizadas",
+        "programadas": "viagens_programadas", 
+        "realizadas": "viagens_realizadas",
+    }, inteiros=("manha_programadas", "manha_realizadas", "tarde_programadas", "tarde_realizadas", "noite_programadas", "noite_realizadas", "viagens_programadas", "viagens_realizadas"), datas=("data",))
+
+
+def tratar_resumo_fxhr(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "Fx_Hor": "faixa_horaria", 
+        "Nr_Veiculos": "numero_veiculos",
+        "Nr_Viagens": "numero_viagens",
+    }, inteiros=("numero_veiculos", "numero_viagens"), datas=("data",))
+
+
+def tratar_fxhr(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "Linha": "linha", 
+        "Fx_Hor": "faixa_horaria",
+        "Nr_Veiculos": "numero_veiculos", 
+        "Nr_Viagens": "numero_viagens", 
+        "Partidas": "partidas",
+    }, inteiros=("numero_veiculos", "numero_viagens", "partidas"), datas=("data",))
+
+
+def tratar_linhas(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "Linha": "linha", 
+        "kmTotal": "quilometragem_total", 
+        "nrViagens": "numero_viagens",
+    }, inteiros=("numero_viagens",), decimais=("quilometragem_total",), datas=("data",))
+
+
+def tratar_viag_ninic(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "Linha": "linha", 
+        "Atendimento": "atendimento", 
+        "Prefixo": "prefixo",
+        "Atividade": "atividade", 
+        "Motorista": "motorista", 
+        "Sentido": "sentido", 
+        "Tabela": "tabela",
+        "statusSaida": "status_saida", 
+        "statusChegada": "status_chegada",
+        "inicioProgramado": "inicio_programado", 
+        "inicioRealizado": "inicio_realizado",
+        "fimProgramado": "fim_programado", 
+        "fimRealizado": "fim_realizado",
+        "kmProd": "km_produtivo", 
+        "kmImprod": "km_improdutivo", 
+        "kmTotal": "km_total",
+    }, decimais=("km_produtivo", "km_improdutivo", "km_total"), datas=("data",))
+
+
+def tratar_viag_nrealiz(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "Linha": "linha", 
+        "Atendimento": "atendimento", 
+        "Prefixo": "prefixo",
+        "Atividade": "atividade", 
+        "Motorista": "motorista", 
+        "Sentido": "sentido", 
+        "Tabela": "tabela",
+        "statusSaida": "status_saida", 
+        "statusChegada": "status_chegada",
+        "inicioProgramado": "inicio_programado", 
+        "inicioRealizado": "inicio_realizado",
+        "fimProgramado": "fim_programado", 
+        "fimRealizado": "fim_realizado",
+        "kmProd": "km_produtivo", 
+        "kmImprod": "km_improdutivo", 
+        "kmTotal": "km_total",
+    }, decimais=("km_produtivo", "km_improdutivo", "km_total"), datas=("data",))
+
+
+def tratar_viag_nterm(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "Linha": "linha", 
+        "Atendimento": "atendimento", 
+        "Prefixo": "prefixo",
+        "Atividade": "atividade", 
+        "Motorista": "motorista", 
+        "Sentido": "sentido", 
+        "Tabela": "tabela",
+        "statusSaida": "status_saida", 
+        "statusChegada": "status_chegada",
+        "inicioProgramado": "inicio_programado", 
+        "inicioRealizado": "inicio_realizado",
+        "fimProgramado": "fim_programado", 
+        "fimRealizado": "fim_realizado",
+        "kmProd": "km_produtivo", 
+        "kmImprod": "km_improdutivo", 
+        "kmTotal": "km_total",
+    }, decimais=("km_produtivo", "km_improdutivo", "km_total"), datas=("data",))
+
+
+def tratar_viagens(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "Linha": "linha", 
+        "Prefixo": "prefixo", 
+        "Atividade": "atividade",
+        "Sentido": "sentido", 
+        "Fx_Hor": "faixa_horaria", 
+        "inicioRealizado": "inicio_realizado",
+        "fimRealizado": "fim_realizado", 
+        "kmProd": "km_produtivo",
+        "kmImprod": "km_improdutivo", 
+        "kmTotal": "km_total",
+    }, decimais=("km_produtivo", "km_improdutivo", "km_total"), datas=("data",))
+
+
+def tratar_passageiros(arquivo):
+    return padronizar(arquivo, {
+        "Mês": "mes", 
+        "Dia": "dia", 
+        "Catraca": "passageiros_catraca",
+        "Antecipados": "passageiros_antecipados", 
+        "Não Pagantes": "passageiros_nao_pagantes",
+        "Total Passageiros": "total_passageiros",
+    }, inteiros=("dia", "passageiros_catraca", "passageiros_antecipados", "passageiros_nao_pagantes", "total_passageiros"))
+
+
+def tratar_saldos(arquivo):
+    tabelas = ler_tabelas(arquivo)
+    if not tabelas:
+        tabela = pd.DataFrame()
+    else:
+        tabela = tabelas[0]
+        for proxima in tabelas[1:]:
+            chaves = [coluna for coluna in ("Mês", "Dia") if coluna in tabela.columns and coluna in proxima.columns]
+            tabela = tabela.merge(proxima, on=chaves, how="outer") if chaves else pd.concat([tabela, proxima], ignore_index=True)
+    return padronizar(tabela, {
+        "Mês": "mes", 
+        "Dia": "dia", 
+        "Série": "serie",
+        "Créditos transferidos para cartões": "creditos_transferidos_cartoes",
+        "Saldo Final": "saldo_final", 
+        "Total Vendas": "total_vendas",
+        "Total Utilização": "total_utilizacao", 
+        "Crédito Circulante": "credito_circulante",
+    }, inteiros=("dia",), decimais=("creditos_transferidos_cartoes", "saldo_final", "total_vendas", "total_utilizacao", "credito_circulante"))
+
+
+def tratar_resumo_geral(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "diaSem": "dia_semana", 
+        "nrVeiculos": "numero_veiculos",
+        "nrMaxVeicFx": "veiculos_pico_faixa", 
+        "nrViagensProgr": "viagens_programadas",
+        "nrViagensRealiz": "viagens_realizadas", 
+        "Dif Viagens": "diferenca_viagens",
+        "kmProd": "km_produtivo", 
+        "kmImprod": "km_improdutivo", 
+        "kmTotal": "km_total",
+    }, inteiros=("numero_veiculos", "veiculos_pico_faixa", "viagens_programadas", "viagens_realizadas", "diferenca_viagens"), decimais=("km_produtivo", "km_improdutivo", "km_total"), datas=("data",))
+
+
+def tratar_padrao(arquivo):
+    return padronizar(arquivo, {
+        "Data": "data", 
+        "Mês": "mes", 
+        "Dia": "dia", 
+        "Linha": "linha",
+        "Fx_Hor": "faixa_horaria", 
+        "Nr_Veiculos": "numero_veiculos",
+        "Nr_Viagens": "numero_viagens", 
+        "Partidas": "partidas", 
+        "kmTotal": "km_total",
+        "nrViagens": "numero_viagens", 
+        "Catraca": "passageiros_catraca",
+        "Antecipados": "passageiros_antecipados", 
+        "Não Pagantes": "passageiros_nao_pagantes",
+        "Total Passageiros": "total_passageiros",
+    }, inteiros=("dia", "numero_veiculos", "numero_viagens", "partidas", "nrViagens", "passageiros_catraca", "passageiros_antecipados", "passageiros_nao_pagantes", "total_passageiros"), decimais=("km_total",), datas=("data",))
+
+
+def rotear_arquivo(arquivo, nome_arquivo=None):
+    nome_origem = nome_arquivo or (arquivo if isinstance(arquivo, (str, Path)) else "")
+    if isinstance(nome_origem, str) and "<" in nome_origem:
+        nome_origem = ""
+    nome = re.sub(r"[^a-z0-9]+", "_", str(nome_origem).lower().replace("\\", "/").split("/")[-1])
+    if "fcv" in nome:
+        categoria, tratamento = "fcv", tratar_fcv
+    elif "resumo_fxhr" in nome or "mensal_resumo" in nome:
+        categoria, tratamento = "resumo_fxhr", tratar_resumo_fxhr
+    elif "fxhr" in nome:
+        categoria, tratamento = "fxhr", tratar_fxhr
+    elif "linhas" in nome:
+        categoria, tratamento = "linhas", tratar_linhas
+    elif "viag_ninic" in nome:
+        categoria, tratamento = "viag_ninic", tratar_viag_ninic
+    elif "viag_nrealiz" in nome:
+        categoria, tratamento = "viag_nrealiz", tratar_viag_nrealiz
+    elif "viag_nterm" in nome:
+        categoria, tratamento = "viag_nterm", tratar_viag_nterm
+    elif "viagens" in nome:
+        categoria, tratamento = "viagens", tratar_viagens
+    elif "passageiros" in nome:
+        categoria, tratamento = "passageiros", tratar_passageiros
+    elif "saldos" in nome:
+        categoria, tratamento = "saldos", tratar_saldos
+    elif re.search(r"(?:mensal|quinzenal)_?\d{6}", nome):
+        categoria, tratamento = "resumo_geral", tratar_resumo_geral
+    else:
+        categoria, tratamento = "padrao", tratar_padrao
+    return categoria, tratamento(arquivo)
+
+
+@app.post("/converter_relatorio_html")
+@app.post("/relatorios/upload-mensal")
+async def upload_relatorio_html(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.lower().endswith((".html", ".htm")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Envie um arquivo HTML",
+        )
+
+    try:
+        conteudo_html = (await file.read()).decode("cp1252")
+        categoria, dataframe = rotear_arquivo(conteudo_html, file.filename)
+        registros = json.loads(
+            dataframe.to_json(orient="records", date_format="iso", force_ascii=False)
+        )
+    except (ValueError, UnicodeDecodeError, pd.errors.ParserError) as erro:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Não foi possível processar o arquivo HTML: {erro}",
+        ) from erro
+
+    return {
+        "arquivo": file.filename,
+        "categoria": categoria,
+        "quantidade": len(registros),
+        "dados": registros,
+    }

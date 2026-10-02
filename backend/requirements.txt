@@ -3,3 +3,7 @@ uvicorn
 python-dotenv
 pymongo
 pwdlib[argon2]
+pandas
+beautifulsoup4
+lxml
+python-multipart
