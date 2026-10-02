@@ -7,6 +7,30 @@ class HomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFDFE9F5),
+      drawer: Drawer(
+        child: SafeArea(
+          child: Column(
+            children: [
+              const ListTile(
+                leading: Icon(Icons.dashboard_outlined),
+                title: Text('Dashboard'),
+              ),
+              const ListTile(
+                leading: Icon(Icons.directions_bus_outlined),
+                title: Text('Operação'),
+              ),
+              const ListTile(
+                leading: Icon(Icons.analytics_outlined),
+                title: Text('Relatórios'),
+              ),
+              const ListTile(
+                leading: Icon(Icons.settings_outlined),
+                title: Text('Configurações'),
+              ),
+            ],
+          ),
+        ),
+      ),
       body: SafeArea(
         child: SingleChildScrollView(
           child: Column(
@@ -20,13 +44,21 @@ class HomePage extends StatelessWidget {
                   children: [
                     Row(
                       children: [
-                        Image.asset(
-                          'assets/images/logo.png',
-                          width: 55,
-                          height: 55,
-                          fit: BoxFit.contain,
+                        Builder(
+                          builder: (context) {
+                            return IconButton(
+                              onPressed: () {
+                                Scaffold.of(context).openDrawer();
+                              },
+                              icon: const Icon(
+                                Icons.menu,
+                                color: Colors.white,
+                                size: 28,
+                              ),
+                            );
+                          },
                         ),
-                        const SizedBox(width: 12),
+                        const SizedBox(width: 2),
                         const Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -54,12 +86,12 @@ class HomePage extends StatelessWidget {
                           ),
                         ),
                         CircleAvatar(
-                          radius: 24,
+                          radius: 21,
                           backgroundColor: Colors.white,
                           child: Icon(
                             Icons.person_outline,
                             color: Color(0xFF1976B9),
-                            size: 27,
+                            size: 24,
                           ),
                         ),
                       ],
