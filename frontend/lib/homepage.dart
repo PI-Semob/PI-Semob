@@ -13,17 +13,18 @@ class HomePage extends StatelessWidget {
             children: [
               Container(
                 width: double.infinity,
-                color: Colors.white,
+                color: const Color(0xFF173F68),
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
-                        const Icon(
-                          Icons.shield,
-                          size: 50,
-                          color: Color(0xFF173F68),
+                        Image.asset(
+                          'assets/images/logo.png',
+                          width: 55,
+                          height: 55,
+                          fit: BoxFit.contain,
                         ),
                         const SizedBox(width: 12),
                         const Expanded(
@@ -33,58 +34,33 @@ class HomePage extends StatelessWidget {
                               Text(
                                 'SEMOB',
                                 style: TextStyle(
-                                  fontSize: 20,
+                                  fontSize: 19,
                                   fontWeight: FontWeight.bold,
-                                  color: Color(0xFF173F68),
+                                  color: Colors.white,
+                                  letterSpacing: 1,
                                 ),
                               ),
+                              SizedBox(height: 3),
                               Text(
-                                'Secretaria de Mobilidade Urbana',
+                                'Mobilidade Urbana',
+                                maxLines: 2,
                                 style: TextStyle(
-                                  fontSize: 13,
-                                  color: Color(0xFF667D95),
+                                  fontSize: 12,
+                                  color: Color(0xFFB8CCE0),
+                                  height: 1.2,
                                 ),
                               ),
                             ],
                           ),
                         ),
-                        TextButton.icon(
-                          onPressed: () {},
-                          icon: const Icon(Icons.logout),
-                          label: const Text('Sair'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
-                    const Row(
-                      children: [
                         CircleAvatar(
                           radius: 24,
-                          backgroundColor: Color(0xFFEAF4FC),
+                          backgroundColor: Colors.white,
                           child: Icon(
                             Icons.person_outline,
                             color: Color(0xFF1976B9),
+                            size: 27,
                           ),
-                        ),
-                        SizedBox(width: 12),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Administrador',
-                              style: TextStyle(
-                                fontSize: 17,
-                                fontWeight: FontWeight.bold,
-                                color: Color(0xFF173F68),
-                              ),
-                            ),
-                            Text(
-                              'Perfil institucional',
-                              style: TextStyle(
-                                color: Color(0xFF8093A8),
-                              ),
-                            ),
-                          ],
                         ),
                       ],
                     ),
