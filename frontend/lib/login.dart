@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'auth_service.dart';
 import 'homepage.dart';
 
 class LoginPage extends StatefulWidget {
-  const LoginPage({super.key});
+  const LoginPage({super.key, this.authService});
+
+  final AuthService? authService;
 
   @override
   State<LoginPage> createState() {
@@ -12,22 +15,56 @@ class LoginPage extends StatefulWidget {
 
 class _LoginPageState extends State<LoginPage> {
   final chaveFormulario = GlobalKey<FormState>();
+  final emailController = TextEditingController();
+  final senhaController = TextEditingController();
+  late final AuthService authService;
 
   bool esconderSenha = true;
+  bool enviando = false;
+
+  @override
+  void initState() {
+    super.initState();
+    authService = widget.authService ?? AuthService();
+  }
+
+  @override
+  void dispose() {
+    emailController.dispose();
+    senhaController.dispose();
+    super.dispose();
+  }
 
   void mostrarMensagem(String mensagem) {
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(mensagem)));
   }
 
-  void entrar() {
-    if (chaveFormulario.currentState!.validate()) {
+  Future<void> entrar() async {
+    if (enviando || !chaveFormulario.currentState!.validate()) return;
+
+    setState(() => enviando = true);
+    try {
+      final resultado = await authService.loginComUsuario(
+        email: emailController.text.trim(),
+        senha: senhaController.text,
+      );
+      if (!mounted) return;
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (context) => const HomePage(),
+          builder: (context) => HomePage(
+            usuario: resultado.usuario,
+            authService: authService,
+          ),
         ),
       );
+    } on AuthException catch (erro) {
+      if (mounted) mostrarMensagem(erro.mensagem);
+    } catch (_) {
+      if (mounted) mostrarMensagem('Não foi possível conectar ao servidor.');
+    } finally {
+      if (mounted) setState(() => enviando = false);
     }
   }
 
@@ -127,6 +164,7 @@ class _LoginPageState extends State<LoginPage> {
                         ),
                       ),
                       TextFormField(
+                        controller: emailController,
                         keyboardType: TextInputType.emailAddress,
                         decoration: decoracaoCampo(
                           'exemplo@email.com',
@@ -157,6 +195,7 @@ class _LoginPageState extends State<LoginPage> {
                         ),
                       ),
                       TextFormField(
+                        controller: senhaController,
                         obscureText: esconderSenha,
                         decoration: decoracaoCampo(
                           'Digite sua senha',
@@ -207,23 +246,34 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                       const SizedBox(height: 24),
                       ElevatedButton(
-                        onPressed: entrar,
+                        onPressed: enviando ? null : entrar,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF1D4E89),
                           foregroundColor: Colors.white,
+                          disabledBackgroundColor: const Color(0xFF1D4E89),
+                          disabledForegroundColor: Colors.white,
                           minimumSize: const Size.fromHeight(56),
                           elevation: 5,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12),
                           ),
                         ),
-                        child: const Text(
-                          'Entrar',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
+                        child: enviando
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Text(
+                                'Entrar',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
                       ),
                       const SizedBox(height: 12),
                       const Row(
@@ -235,11 +285,14 @@ class _LoginPageState extends State<LoginPage> {
                             color: Color(0xFF00A878),
                           ),
                           SizedBox(width: 6),
-                          Text(
-                            'Ambiente de login oficial e seguro',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Color(0xFF64748B),
+                          Flexible(
+                            child: Text(
+                              'Ambiente de login oficial e seguro',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF64748B),
+                              ),
                             ),
                           ),
                         ],

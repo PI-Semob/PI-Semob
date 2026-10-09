@@ -1,20 +1,25 @@
 import io
 import json
+import logging
 import re
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pwdlib import PasswordHash
 from pwdlib.exceptions import UnknownHashError
 from pydantic import BaseModel, Field, field_validator
+from pymongo import ASCENDING
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from conexao import db
+from consultas import filtros_relatorios, listar_relatorios, opcoes_dashboard, resumo_dashboard
+from importacao import importar_zip
 
 app = FastAPI()
 
@@ -30,6 +35,21 @@ colecao_usuarios = db["usuarios"]
 colecao_relatorios_mensais = db["relatorios_mensais"]
 password_hash = PasswordHash.recommended()
 PADRAO_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+@app.on_event("startup")
+def preparar_indices_de_consulta():
+    """Mantém as consultas de período e de listagem limitadas por índices."""
+    try:
+        colecao_relatorios_mensais.create_index([
+            ("arquivo_origem", ASCENDING), ("categoria", ASCENDING),
+            ("dados_tratados.linha", ASCENDING),
+        ])
+        colecao_relatorios_mensais.create_index([
+            ("categoria", ASCENDING), ("dados_tratados.data", ASCENDING),
+        ])
+    except PyMongoError:
+        logging.getLogger(__name__).warning("Índices de consulta indisponíveis")
 
 
 @app.exception_handler(RequestValidationError)
@@ -180,7 +200,74 @@ def listar_usuarios():
 
     return [formatar_usuario(usuario) for usuario in usuarios]
 
-def ler_tabelas(arquivo):
+
+@app.get("/health")
+def health():
+    try:
+        db.command("ping")
+    except PyMongoError:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "indisponivel", "banco": "indisponivel"},
+        )
+    return {"status": "ok", "banco": "conectado"}
+
+
+@app.get("/dashboard/opcoes")
+def consultar_opcoes_dashboard():
+    try:
+        return opcoes_dashboard(colecao_relatorios_mensais)
+    except PyMongoError as erro:
+        raise HTTPException(503, "Não foi possível consultar o Dashboard") from erro
+
+
+@app.get("/dashboard/resumo")
+def consultar_resumo_dashboard(
+    periodo: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    abrangencia: Literal["Mensal", "Quinzenal"] | None = None,
+):
+    try:
+        if periodo is None or abrangencia is None:
+            opcoes = opcoes_dashboard(colecao_relatorios_mensais)
+            periodo = periodo or opcoes["periodo_padrao"]
+            if abrangencia is None:
+                atual = next((item for item in opcoes["periodos"]
+                              if item["periodo"] == periodo), None)
+                abrangencia = (atual["abrangencias"][0] if atual else None)
+        if periodo is None or abrangencia is None:
+            raise HTTPException(404, "Nenhum relatório disponível")
+        return resumo_dashboard(colecao_relatorios_mensais, periodo, abrangencia)
+    except PyMongoError as erro:
+        raise HTTPException(503, "Não foi possível consultar o Dashboard") from erro
+
+
+@app.get("/relatorios/filtros")
+def consultar_filtros_relatorios():
+    try:
+        return filtros_relatorios(colecao_relatorios_mensais)
+    except PyMongoError as erro:
+        raise HTTPException(503, "Não foi possível consultar os relatórios") from erro
+
+
+@app.get("/relatorios")
+def consultar_relatorios(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    tipo: str | None = Query(default=None, min_length=1, max_length=100),
+    periodo: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    linha: str | None = Query(default=None, min_length=1, max_length=50),
+    abrangencia: Literal["Mensal", "Quinzenal"] | None = None,
+):
+    try:
+        return listar_relatorios(
+            colecao_relatorios_mensais, page, limit, tipo, periodo, linha,
+            abrangencia,
+        )
+    except PyMongoError as erro:
+        raise HTTPException(503, "Não foi possível consultar os relatórios") from erro
+
+
+def ler_tabelas(arquivo, *, milhares=",", decimal="."):
     if hasattr(arquivo, "read"):
         conteudo_html = arquivo.read()
         if isinstance(conteudo_html, bytes):
@@ -190,7 +277,10 @@ def ler_tabelas(arquivo):
     else:
         conteudo_html = arquivo
 
-    tabelas = pd.read_html(io.StringIO(conteudo_html), encoding="cp1252")
+    tabelas = pd.read_html(
+        io.StringIO(conteudo_html), encoding="cp1252",
+        thousands=milhares, decimal=decimal,
+    )
     tabelas = [
         tabela
         for tabela in tabelas
@@ -211,8 +301,8 @@ def ler_tabelas(arquivo):
     return tabelas
 
 
-def ler_tabela(arquivo):
-    tabelas = ler_tabelas(arquivo)
+def ler_tabela(arquivo, *, milhares=",", decimal="."):
+    tabelas = ler_tabelas(arquivo, milhares=milhares, decimal=decimal)
     return max(tabelas, key=len) if tabelas else pd.DataFrame()
 
 
@@ -227,14 +317,26 @@ def normalizar_valor_numerico(valor):
     return texto
 
 
-def padronizar(arquivo, mapeamento, inteiros=(), decimais=(), datas=()):
+def normalizar_inteiro_com_milhar(valor):
+    if isinstance(valor, str):
+        texto = valor.strip().replace(" ", "")
+        if re.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3})+", texto):
+            return texto.replace(".", "")
+    return normalizar_valor_numerico(valor)
+
+
+def padronizar(arquivo, mapeamento, inteiros=(), decimais=(), datas=(),
+               inteiros_com_milhar=()):
     tabela = arquivo.copy() if isinstance(arquivo, pd.DataFrame) else ler_tabela(arquivo).copy()
     tabela.columns = [str(coluna).strip() for coluna in tabela.columns]
     tabela = tabela.rename(columns=mapeamento)
 
     for coluna in inteiros:
         if coluna in tabela.columns:
-            valores = tabela[coluna].map(normalizar_valor_numerico)
+            normalizar = (normalizar_inteiro_com_milhar
+                          if coluna in inteiros_com_milhar
+                          else normalizar_valor_numerico)
+            valores = tabela[coluna].map(normalizar)
             tabela[coluna] = pd.to_numeric(valores, errors="coerce").fillna(0).astype("int64")
 
     for coluna in decimais:
@@ -374,30 +476,38 @@ def tratar_viagens(arquivo):
 
 
 def tratar_passageiros(arquivo):
-    return padronizar(arquivo, {
+    tabela = (arquivo if isinstance(arquivo, pd.DataFrame)
+              else ler_tabela(arquivo, milhares=".", decimal=","))
+    contagens = ("passageiros_catraca", "passageiros_antecipados",
+                 "passageiros_nao_pagantes", "total_passageiros")
+    return padronizar(tabela, {
         "Mês": "mes", 
         "Dia": "dia", 
         "Catraca": "passageiros_catraca",
         "Antecipados": "passageiros_antecipados", 
         "Não Pagantes": "passageiros_nao_pagantes",
         "Total Passageiros": "total_passageiros",
-    }, inteiros=("dia", "passageiros_catraca", "passageiros_antecipados", "passageiros_nao_pagantes", "total_passageiros"))
+    }, inteiros=("dia", *contagens), inteiros_com_milhar=contagens)
 
 
 def tratar_saldos(arquivo):
-    tabelas = ler_tabelas(arquivo)
-    if not tabelas:
-        tabela = pd.DataFrame()
+    if isinstance(arquivo, pd.DataFrame):
+        tabela = arquivo
     else:
-        tabela = tabelas[0]
-        for proxima in tabelas[1:]:
-            chaves = [coluna for coluna in ("Mês", "Dia") if coluna in tabela.columns and coluna in proxima.columns]
-            tabela = tabela.merge(proxima, on=chaves, how="outer") if chaves else pd.concat([tabela, proxima], ignore_index=True)
+        tabelas = ler_tabelas(arquivo)
+        if not tabelas:
+            tabela = pd.DataFrame()
+        else:
+            tabela = tabelas[0]
+            for proxima in tabelas[1:]:
+                chaves = [coluna for coluna in ("Mês", "Dia") if coluna in tabela.columns and coluna in proxima.columns]
+                tabela = tabela.merge(proxima, on=chaves, how="outer") if chaves else pd.concat([tabela, proxima], ignore_index=True)
     return padronizar(tabela, {
         "Mês": "mes", 
         "Dia": "dia", 
         "Série": "serie",
         "Créditos transferidos para cartões": "creditos_transferidos_cartoes",
+        "Créditos transferidospara cartões": "creditos_transferidos_cartoes",
         "Saldo Final": "saldo_final", 
         "Total Vendas": "total_vendas",
         "Total Utilização": "total_utilizacao", 
@@ -439,8 +549,7 @@ def tratar_padrao(arquivo):
     }, inteiros=("dia", "numero_veiculos", "numero_viagens", "partidas", "nrViagens", "passageiros_catraca", "passageiros_antecipados", "passageiros_nao_pagantes", "total_passageiros"), decimais=("km_total",), datas=("data",))
 
 
-def rotear_arquivo(arquivo, nome_arquivo=None):
-    nome_origem = nome_arquivo or (arquivo if isinstance(arquivo, (str, Path)) else "")
+def identificar_tratamento(nome_origem):
     if isinstance(nome_origem, str) and "<" in nome_origem:
         nome_origem = ""
     nome = re.sub(r"[^a-z0-9]+", "_", str(nome_origem).lower().replace("\\", "/").split("/")[-1])
@@ -468,7 +577,18 @@ def rotear_arquivo(arquivo, nome_arquivo=None):
         categoria, tratamento = "resumo_geral", tratar_resumo_geral
     else:
         categoria, tratamento = "padrao", tratar_padrao
+    return categoria, tratamento
+
+
+def rotear_arquivo(arquivo, nome_arquivo=None):
+    nome_origem = nome_arquivo or (arquivo if isinstance(arquivo, (str, Path)) else "")
+    categoria, tratamento = identificar_tratamento(nome_origem)
     return categoria, tratamento(arquivo)
+
+
+@app.post("/relatorios/importar-zip")
+def importar_relatorios_zip(file: UploadFile = File(...)):
+    return importar_zip(file, colecao_relatorios_mensais, identificar_tratamento)
 
 
 @app.post("/converter_relatorio_html")
