@@ -15,7 +15,7 @@ class ApiConfig {
       return 'http://10.0.2.2:8000';
     }
 
-    return 'http://localhost:8000';
+    return 'http://127.0.0.1:8000';
   }
 }
 
@@ -27,6 +27,25 @@ class AuthException implements Exception {
 
   @override
   String toString() => mensagem;
+}
+
+class UsuarioAutenticado {
+  const UsuarioAutenticado({
+    required this.id,
+    required this.nome,
+    required this.email,
+  });
+
+  final String id;
+  final String nome;
+  final String email;
+}
+
+class LoginResult {
+  const LoginResult({required this.mensagem, required this.usuario});
+
+  final String mensagem;
+  final UsuarioAutenticado usuario;
 }
 
 class AuthService {
@@ -58,11 +77,37 @@ class AuthService {
     required String email,
     required String senha,
   }) async {
+    final resultado = await loginComUsuario(email: email, senha: senha);
+    return resultado.mensagem;
+  }
+
+  Future<LoginResult> loginComUsuario({
+    required String email,
+    required String senha,
+  }) async {
     final resposta = await _post('/login', {
       'email': email,
       'senha': senha,
     });
-    return resposta['mensagem'] as String? ?? 'Login realizado com sucesso';
+    final usuario = resposta['usuario'];
+    if (usuario is! Map<String, dynamic> ||
+        usuario['id'] is! String ||
+        (usuario['id'] as String).isEmpty ||
+        usuario['nome'] is! String ||
+        (usuario['nome'] as String).isEmpty ||
+        usuario['email'] is! String ||
+        (usuario['email'] as String).isEmpty) {
+      throw const AuthException('Resposta inválida do servidor.');
+    }
+    return LoginResult(
+      mensagem:
+          resposta['mensagem'] as String? ?? 'Login realizado com sucesso',
+      usuario: UsuarioAutenticado(
+        id: usuario['id'] as String,
+        nome: usuario['nome'] as String,
+        email: usuario['email'] as String,
+      ),
+    );
   }
 
   Future<Map<String, dynamic>> _post(
@@ -85,7 +130,7 @@ class AuthService {
       throw const AuthException('Não foi possível conectar ao servidor.');
     }
 
-    final corpo = _decodificarResposta(resposta.body);
+    final corpo = _decodificarResposta(utf8.decode(resposta.bodyBytes));
     if (resposta.statusCode >= 200 && resposta.statusCode < 300) {
       return corpo;
     }
