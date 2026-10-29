@@ -10,6 +10,7 @@ from pymongo.errors import PyMongoError
 
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
 os.environ.setdefault("DB_NAME", "semob_test")
+os.environ.setdefault("TOKEN_SECRET", "segredo-de-teste-nao-usar-em-producao")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import main
@@ -97,12 +98,22 @@ class TesteConsultas(unittest.TestCase):
         self.anterior = main.colecao_relatorios_mensais
         main.colecao_relatorios_mensais = self.colecao
         self.cliente = TestClient(main.app)
+        self.cabecalhos = {
+            "Authorization": f"Bearer {main.criar_token('usuario-teste', main.TOKEN_SECRET)}"
+        }
 
     def tearDown(self):
         main.colecao_relatorios_mensais = self.anterior
 
+    def test_dashboard_bloqueia_chamadas_sem_token(self):
+        for caminho in ("/dashboard/opcoes", "/dashboard/resumo"):
+            resposta = self.cliente.get(caminho)
+            self.assertEqual(resposta.status_code, 401)
+
     def test_opcoes_usam_periodo_e_abrangencia_dos_arquivos_reais(self):
-        resposta = self.cliente.get("/dashboard/opcoes")
+        resposta = self.cliente.get(
+            "/dashboard/opcoes", headers=self.cabecalhos,
+        )
         self.assertEqual(resposta.status_code, 200, resposta.text)
         self.assertEqual(resposta.json()["periodos"], [
             {"periodo": "2026-08", "abrangencias": ["Mensal", "Quinzenal"]}
@@ -112,7 +123,8 @@ class TesteConsultas(unittest.TestCase):
 
     def test_dashboard_soma_dias_sem_duplicar_total_ou_quinzenal(self):
         resposta = self.cliente.get(
-            "/dashboard/resumo?periodo=2026-08&abrangencia=Mensal"
+            "/dashboard/resumo?periodo=2026-08&abrangencia=Mensal",
+            headers=self.cabecalhos,
         )
         self.assertEqual(resposta.status_code, 200, resposta.text)
         dados = resposta.json()
@@ -134,7 +146,7 @@ class TesteConsultas(unittest.TestCase):
     def test_relatorios_filtra_linha_de_transporte_e_pagina_resultados(self):
         resposta = self.cliente.get(
             "/relatorios?page=2&limit=1&tipo=linhas&periodo=2026-08"
-            "&abrangencia=Mensal&linha=01"
+            "&abrangencia=Mensal&linha=01", headers=self.cabecalhos,
         )
         self.assertEqual(resposta.status_code, 200, resposta.text)
         dados = resposta.json()
@@ -147,7 +159,7 @@ class TesteConsultas(unittest.TestCase):
         self.assertNotIn("_id", dados["itens"][0])
 
     def test_filtros_e_validacao_de_paginacao(self):
-        resposta = self.cliente.get("/relatorios/filtros")
+        resposta = self.cliente.get("/relatorios/filtros", headers=self.cabecalhos)
         self.assertEqual(resposta.status_code, 200, resposta.text)
         self.assertIn("2026-08", resposta.json()["periodos"])
         self.assertIn("linhas", resposta.json()["tipos"])

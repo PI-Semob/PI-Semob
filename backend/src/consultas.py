@@ -1,7 +1,6 @@
-"""Consultas compactas dos relatórios importados para Dashboard e listagem."""
-
 import re
 from collections import defaultdict
+from datetime import date, datetime, timedelta
 
 
 MESES = {
@@ -14,7 +13,6 @@ ABRANGENCIAS = ("Mensal", "Quinzenal")
 
 
 def periodo_abrangencia_do_arquivo(caminho):
-    """Lê somente o mês e a abrangência que constam no caminho de origem."""
     if not isinstance(caminho, str):
         return None
     encontrado = PADRAO_CAMINHO.search(caminho.replace("\\", "/"))
@@ -76,20 +74,7 @@ def arquivos_filtrados(por_periodo, periodo=None, abrangencia=None):
 
 def listar_relatorios(colecao, pagina, limite, tipo=None, periodo=None,
                      linha=None, abrangencia=None):
-    filtro = {}
-    if tipo:
-        filtro["categoria"] = tipo
-    if linha:
-        filtro["dados_tratados.linha"] = linha
-    if periodo or abrangencia:
-        arquivos = arquivos_filtrados(
-            arquivos_e_periodos(colecao), periodo, abrangencia,
-        )
-        if not arquivos:
-            return {"itens": [], "pagina": pagina, "limite": limite,
-                    "total": 0, "paginas": 0}
-        filtro["arquivo_origem"] = {"$in": arquivos}
-
+    filtro = filtro_relatorios(colecao, tipo, periodo, linha, abrangencia)
     total = colecao.count_documents(filtro)
     campos = {"arquivo_origem": 1, "categoria": 1, "tabela": 1, "linha": 1,
               "dados_originais": 1, "dados_tratados": 1}
@@ -102,6 +87,180 @@ def listar_relatorios(colecao, pagina, limite, tipo=None, periodo=None,
         itens.append(documento)
     return {"itens": itens, "pagina": pagina, "limite": limite,
             "total": total, "paginas": (total + limite - 1) // limite}
+
+
+def filtro_relatorios(colecao, tipo=None, periodo=None, linha=None,
+                      abrangencia=None):
+    filtro = {}
+    if tipo:
+        filtro["categoria"] = tipo
+    if linha:
+        filtro["dados_tratados.linha"] = linha
+    if periodo or abrangencia:
+        arquivos = arquivos_filtrados(
+            arquivos_e_periodos(colecao), periodo, abrangencia,
+        )
+        if not arquivos:
+            filtro["arquivo_origem"] = {"$in": []}
+            return filtro
+        filtro["arquivo_origem"] = {"$in": arquivos}
+
+    return filtro
+
+
+def exportar_relatorios_csv(colecao, tipo=None, periodo=None, linha=None,
+                            abrangencia=None):
+    filtro = filtro_relatorios(colecao, tipo, periodo, linha, abrangencia)
+    cursor = colecao.find(filtro, {
+        "arquivo_origem": 1, "categoria": 1, "tabela": 1, "linha": 1,
+        "dados_originais": 1, "dados_tratados": 1,
+    }).sort("_id", -1)
+    return list(cursor)
+
+
+def _estagio_data(campo_data):
+    return {"$addFields": {"_data_relatorio": {"$dateFromString": {
+        "dateString": {"$substrBytes": [campo_data, 0, 10]},
+        "format": "%Y-%m-%d", "onError": None, "onNull": None,
+    }}}}
+
+
+def _data_mes_dia():
+    dia = {"$convert": {"input": "$dados_tratados.dia", "to": "int",
+                        "onError": None, "onNull": None}}
+    return {"$addFields": {"_data_relatorio": {"$dateFromString": {
+        "dateString": {"$concat": [
+            "$dados_tratados.mes", "-",
+            {"$cond": [{"$lt": [dia, 10]},
+                       {"$concat": ["0", {"$toString": dia}]},
+                       {"$toString": dia}]},
+        ]},
+        "format": "%Y-%m-%d", "onError": None, "onNull": None,
+    }}}}
+
+
+def _agrupar_por_dia(colecao, categoria, campos, inicio, fim, linha=None,
+                     mes_dia=False):
+    criterios = {"categoria": categoria}
+    if linha:
+        criterios["dados_tratados.linha"] = linha
+    pipeline = [{"$match": criterios}, _data_mes_dia() if mes_dia else
+                _estagio_data("$dados_tratados.data"),
+                {"$match": {"_data_relatorio": {"$ne": None}}}]
+    if inicio is not None and fim is not None:
+        inicio_data = datetime.combine(inicio, datetime.min.time())
+        fim_exclusivo = datetime.combine(fim + timedelta(days=1), datetime.min.time())
+        pipeline.append({"$match": {"_data_relatorio": {
+            "$gte": inicio_data, "$lt": fim_exclusivo,
+        }}})
+    pipeline.extend([
+                {"$group": {"_id": {"$dateToString": {
+                    "format": "%Y-%m-%d", "date": "$_data_relatorio",
+                }}, **{nome: {"$sum": f"$dados_tratados.{campo}"}
+                       for nome, campo in campos.items()}}},
+                {"$sort": {"_id": 1}}])
+    return list(colecao.aggregate(pipeline))
+
+
+def resumo_relatorios(colecao, inicio, fim, granularidade="diaria", linha=None):
+    operacao_categoria = "linhas" if linha else "resumo_geral"
+    operacao_campos = ({"viagens_realizadas": "numero_viagens",
+                        "quilometragem_km": "quilometragem_total"} if linha else {
+        "viagens_programadas": "viagens_programadas",
+        "viagens_realizadas": "viagens_realizadas",
+        "quilometragem_km": "km_total",
+    })
+    operacao = _agrupar_por_dia(
+        colecao, operacao_categoria, operacao_campos, inicio, fim, linha,
+    )
+    passageiros = [] if linha else _agrupar_por_dia(colecao, "passageiros", {
+        "passageiros_catraca": "passageiros_catraca",
+        "passageiros_antecipados": "passageiros_antecipados",
+        "passageiros_nao_pagantes": "passageiros_nao_pagantes",
+    }, inicio, fim, mes_dia=True)
+    financeiro = [] if linha else _agrupar_por_dia(colecao, "saldos", {
+        "total_vendas": "total_vendas",
+        "total_utilizacao": "total_utilizacao",
+        "saldo_final": "saldo_final",
+    }, inicio, fim, mes_dia=True)
+
+    def indexar(itens):
+        return {item["_id"]: item for item in itens}
+
+    operacao_por_dia = indexar(operacao)
+    passageiros_por_dia = indexar(passageiros)
+    financeiro_por_dia = indexar(financeiro)
+    datas = sorted(set(operacao_por_dia) | set(passageiros_por_dia) |
+                   set(financeiro_por_dia))
+    por_periodo = {}
+    for texto_data in datas:
+        dia = date.fromisoformat(texto_data)
+        if granularidade == "semanal":
+            segunda = dia - timedelta(days=dia.weekday())
+            chave = segunda.isoformat()
+        elif granularidade == "mensal":
+            chave = dia.strftime("%Y-%m")
+        else:
+            chave = texto_data
+        ponto = por_periodo.setdefault(chave, {
+            "periodo": chave, "viagens_programadas": 0,
+            "viagens_realizadas": 0, "quilometragem_km": 0,
+            "passageiros_catraca": 0, "passageiros_antecipados": 0,
+            "passageiros_nao_pagantes": 0, "total_vendas": 0,
+            "total_utilizacao": 0, "saldo_final": None,
+            "dias_operacao": 0,
+        })
+        if texto_data in operacao_por_dia:
+            ponto["dias_operacao"] += 1
+        for fonte, indice in ((operacao_por_dia, texto_data),
+                              (passageiros_por_dia, texto_data),
+                              (financeiro_por_dia, texto_data)):
+            item = fonte.get(indice, {})
+            for campo in ponto:
+                if campo in ("periodo", "saldo_final"):
+                    continue
+                ponto[campo] += item.get(campo, 0) or 0
+        if texto_data in financeiro_por_dia:
+            ponto["saldo_final"] = financeiro_por_dia[texto_data].get("saldo_final")
+
+    serie = list(por_periodo.values())
+    totais = {
+        campo: sum(item.get(campo, 0) or 0 for item in serie)
+        for campo in ("viagens_programadas", "viagens_realizadas",
+                      "quilometragem_km", "passageiros_catraca",
+                      "passageiros_antecipados", "passageiros_nao_pagantes",
+                      "total_vendas", "total_utilizacao")
+    }
+    totais["passageiros_pagantes"] = (totais.pop("passageiros_catraca") +
+                                       totais.pop("passageiros_antecipados"))
+    totais["total_passageiros"] = (totais["passageiros_pagantes"] +
+                                    totais["passageiros_nao_pagantes"])
+    totais["saldo_final"] = next((item["saldo_final"] for item in reversed(serie)
+                                  if item["saldo_final"] is not None), None)
+    totais["dias_com_dados"] = len(datas)
+    if not operacao:
+        for campo in ("viagens_programadas", "viagens_realizadas", "quilometragem_km"):
+            totais[campo] = None
+    if linha:
+        for campo in ("passageiros_pagantes", "passageiros_nao_pagantes",
+                      "total_passageiros", "total_vendas", "total_utilizacao",
+                      "saldo_final"):
+            totais[campo] = None
+    for ponto in serie:
+        ponto["passageiros_pagantes"] = (ponto["passageiros_catraca"] +
+                                          ponto["passageiros_antecipados"])
+        ponto["total_passageiros"] = (ponto["passageiros_pagantes"] +
+                                       ponto["passageiros_nao_pagantes"])
+        if linha:
+            ponto["viagens_programadas"] = None
+            for campo in ("passageiros_catraca", "passageiros_antecipados",
+                          "passageiros_nao_pagantes", "passageiros_pagantes",
+                          "total_passageiros", "total_vendas", "total_utilizacao"):
+                ponto[campo] = None
+    return {"inicio": inicio.isoformat() if inicio else None,
+            "fim": fim.isoformat() if fim else None,
+            "granularidade": granularidade, "indicadores": totais,
+            "serie": serie}
 
 
 def proximo_periodo(periodo):
