@@ -49,12 +49,14 @@ class _LoginPageState extends State<LoginPage> {
         email: emailController.text.trim(),
         senha: senhaController.text,
       );
+      await authService.salvarSessao(resultado);
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
           builder: (context) => HomePage(
             usuario: resultado.usuario,
+            accessToken: resultado.accessToken,
             authService: authService,
           ),
         ),

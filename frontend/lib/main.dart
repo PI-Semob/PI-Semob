@@ -1,12 +1,18 @@
 import 'package:flutter/material.dart';
+import 'auth_service.dart';
+import 'homepage.dart';
 import 'login.dart';
 
-void main() {
-  runApp(const MeuApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final sessao = await AuthService().carregarSessao();
+  runApp(MeuApp(sessao: sessao));
 }
 
 class MeuApp extends StatelessWidget {
-  const MeuApp({super.key});
+  const MeuApp({super.key, this.sessao});
+
+  final SessaoSalva? sessao;
 
   @override
   Widget build(BuildContext context) {
@@ -21,7 +27,12 @@ class MeuApp extends StatelessWidget {
           brightness: Brightness.light,
         ),
       ),
-      home: const LoginPage(),
+      home: sessao == null
+          ? const LoginPage()
+          : HomePage(
+              usuario: sessao!.usuario,
+              accessToken: sessao!.accessToken,
+            ),
     );
   }
 }

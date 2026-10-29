@@ -1,25 +1,33 @@
+import asyncio
+import csv
 import io
 import json
 import logging
+import os
 import re
 from pathlib import Path
+from datetime import date
 from typing import Literal
 
 import pandas as pd
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
 from pwdlib.exceptions import UnknownHashError
 from pydantic import BaseModel, Field, field_validator
+from bson import ObjectId
 from pymongo import ASCENDING
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from conexao import db
-from consultas import filtros_relatorios, listar_relatorios, opcoes_dashboard, resumo_dashboard
-from importacao import importar_zip
+from consultas import (exportar_relatorios_csv, filtros_relatorios, listar_relatorios,
+                       opcoes_dashboard, resumo_dashboard, resumo_relatorios)
+from importacao import concluir_zip, importar_zip, liberar_zip, reservar_zip
+from tokens import criar_token, validar_token
 
 app = FastAPI()
 
@@ -33,8 +41,14 @@ app.add_middleware(
 
 colecao_usuarios = db["usuarios"]
 colecao_relatorios_mensais = db["relatorios_mensais"]
+colecao_zips_processados = db["zips_processados"]
 password_hash = PasswordHash.recommended()
 PADRAO_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+TOKEN_SECRET = os.getenv("TOKEN_SECRET")
+if not TOKEN_SECRET:
+    raise RuntimeError("Configure TOKEN_SECRET no arquivo backend/.env")
+
+autenticacao_bearer = HTTPBearer(auto_error=False)
 
 
 @app.on_event("startup")
@@ -47,6 +61,14 @@ def preparar_indices_de_consulta():
         ])
         colecao_relatorios_mensais.create_index([
             ("categoria", ASCENDING), ("dados_tratados.data", ASCENDING),
+        ])
+        colecao_relatorios_mensais.create_index([
+            ("categoria", ASCENDING), ("dados_tratados.mes", ASCENDING),
+            ("dados_tratados.dia", ASCENDING),
+        ])
+        colecao_relatorios_mensais.create_index([
+            ("categoria", ASCENDING), ("dados_tratados.linha", ASCENDING),
+            ("dados_tratados.data", ASCENDING),
         ])
     except PyMongoError:
         logging.getLogger(__name__).warning("Índices de consulta indisponíveis")
@@ -94,6 +116,11 @@ class LoginEntrada(BaseModel):
         return valor.strip().lower() if isinstance(valor, str) else valor
 
 
+class AlterarSenhaEntrada(BaseModel):
+    senha_atual: str = Field(min_length=1, max_length=128)
+    nova_senha: str = Field(min_length=8, max_length=128)
+
+
 class UsuarioResumo(BaseModel):
     id: str
     nome: str
@@ -108,6 +135,25 @@ class CadastroResposta(BaseModel):
 class LoginResposta(BaseModel):
     mensagem: str
     usuario: UsuarioResumo
+    access_token: str
+    token_type: Literal["bearer"]
+
+
+def usuario_autenticado(
+    credenciais: HTTPAuthorizationCredentials | None = Depends(autenticacao_bearer),
+) -> str:
+    usuario_id = (
+        validar_token(credenciais.credentials, TOKEN_SECRET)
+        if credenciais and credenciais.scheme.lower() == "bearer"
+        else None
+    )
+    if not usuario_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token ausente ou inválido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return usuario_id
 
 
 def formatar_usuario(usuario):
@@ -185,7 +231,41 @@ def login(credenciais: LoginEntrada):
     return {
         "mensagem": "Login realizado com sucesso",
         "usuario": formatar_usuario(usuario),
+        "access_token": criar_token(str(usuario["_id"]), TOKEN_SECRET),
+        "token_type": "bearer",
     }
+
+
+@app.post("/usuarios/alterar-senha")
+def alterar_senha(
+    dados: AlterarSenhaEntrada,
+    usuario_id: str = Depends(usuario_autenticado),
+):
+    try:
+        usuario = colecao_usuarios.find_one({"_id": ObjectId(usuario_id)})
+        if not usuario:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuário da sessão não foi encontrado.",
+            )
+        if not senha_valida(dados.senha_atual, usuario.get("senha_hash")):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A senha atual não confere.",
+            )
+        colecao_usuarios.update_one(
+            {"_id": usuario["_id"]},
+            {"$set": {"senha_hash": password_hash.hash(dados.nova_senha)}},
+        )
+    except HTTPException:
+        raise
+    except PyMongoError as erro:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Não foi possível alterar a senha.",
+        ) from erro
+
+    return {"mensagem": "Senha alterada com sucesso."}
 
 
 @app.get("/usuarios", response_model=list[UsuarioResumo])
@@ -214,7 +294,9 @@ def health():
 
 
 @app.get("/dashboard/opcoes")
-def consultar_opcoes_dashboard():
+def consultar_opcoes_dashboard(
+    _usuario_id: str = Depends(usuario_autenticado),
+):
     try:
         return opcoes_dashboard(colecao_relatorios_mensais)
     except PyMongoError as erro:
@@ -225,6 +307,7 @@ def consultar_opcoes_dashboard():
 def consultar_resumo_dashboard(
     periodo: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
     abrangencia: Literal["Mensal", "Quinzenal"] | None = None,
+    _usuario_id: str = Depends(usuario_autenticado),
 ):
     try:
         if periodo is None or abrangencia is None:
@@ -242,11 +325,66 @@ def consultar_resumo_dashboard(
 
 
 @app.get("/relatorios/filtros")
-def consultar_filtros_relatorios():
+def consultar_filtros_relatorios(
+    _usuario_id: str = Depends(usuario_autenticado),
+):
     try:
         return filtros_relatorios(colecao_relatorios_mensais)
     except PyMongoError as erro:
         raise HTTPException(503, "Não foi possível consultar os relatórios") from erro
+
+
+@app.get("/relatorios/resumo")
+def consultar_resumo_relatorios(
+    inicio: date | None = None,
+    fim: date | None = None,
+    granularidade: Literal["diaria", "semanal", "mensal"] = "diaria",
+    linha: str | None = Query(default=None, min_length=1, max_length=50),
+    _usuario_id: str = Depends(usuario_autenticado),
+):
+    if inicio and fim and inicio > fim:
+        raise HTTPException(400, "A data inicial deve ser anterior à data final.")
+    if (inicio is None) != (fim is None):
+        raise HTTPException(400, "Informe as duas datas ou deixe ambas vazias.")
+    try:
+        return resumo_relatorios(colecao_relatorios_mensais, inicio, fim,
+                                 granularidade, linha)
+    except PyMongoError as erro:
+        raise HTTPException(503, "Não foi possível consolidar os relatórios.") from erro
+
+
+@app.get("/relatorios/exportar.csv")
+def baixar_relatorios_csv(
+    tipo: str | None = Query(default=None, min_length=1, max_length=100),
+    periodo: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    linha: str | None = Query(default=None, min_length=1, max_length=50),
+    abrangencia: Literal["Mensal", "Quinzenal"] | None = None,
+    _usuario_id: str = Depends(usuario_autenticado),
+):
+    """Exporta todas as linhas que atendem aos filtros ativos da listagem."""
+    try:
+        registros = exportar_relatorios_csv(
+            colecao_relatorios_mensais, tipo, periodo, linha, abrangencia,
+        )
+    except PyMongoError as erro:
+        raise HTTPException(503, "Não foi possível exportar os relatórios.") from erro
+
+    saida = io.StringIO(newline="")
+    escritor = csv.writer(saida)
+    escritor.writerow(["arquivo_origem", "categoria", "tabela", "registro",
+                       "dados_originais", "dados_tratados"])
+    for registro in registros:
+        escritor.writerow([
+            registro.get("arquivo_origem", ""), registro.get("categoria", ""),
+            registro.get("tabela", ""), registro.get("linha", ""),
+            json.dumps(registro.get("dados_originais", {}), ensure_ascii=False),
+            json.dumps(registro.get("dados_tratados", {}), ensure_ascii=False),
+        ])
+    conteudo = "\ufeff" + saida.getvalue()
+    return StreamingResponse(
+        iter([conteudo]), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=relatorios_semob.csv"},
+    )
 
 
 @app.get("/relatorios")
@@ -257,6 +395,7 @@ def consultar_relatorios(
     periodo: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
     linha: str | None = Query(default=None, min_length=1, max_length=50),
     abrangencia: Literal["Mensal", "Quinzenal"] | None = None,
+    _usuario_id: str = Depends(usuario_autenticado),
 ):
     try:
         return listar_relatorios(
@@ -587,8 +726,56 @@ def rotear_arquivo(arquivo, nome_arquivo=None):
 
 
 @app.post("/relatorios/importar-zip")
-def importar_relatorios_zip(file: UploadFile = File(...)):
-    return importar_zip(file, colecao_relatorios_mensais, identificar_tratamento)
+async def importar_relatorios_zip(file: UploadFile = File(...)):
+    id_reserva = await asyncio.to_thread(reservar_zip, file, colecao_zips_processados)
+    fila = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def publicar_progresso(mensagem, percentual):
+        loop.call_soon_threadsafe(
+            fila.put_nowait,
+            {"tipo": "progresso", "mensagem": mensagem, "progresso": percentual},
+        )
+
+    async def processar():
+        try:
+            resultado = await asyncio.to_thread(
+                importar_zip, file, colecao_relatorios_mensais,
+                identificar_tratamento, publicar_progresso,
+            )
+            await asyncio.to_thread(concluir_zip, colecao_zips_processados, id_reserva)
+            return resultado
+        except Exception:
+            await asyncio.to_thread(liberar_zip, colecao_zips_processados, id_reserva)
+            raise
+
+    async def eventos():
+        tarefa = asyncio.create_task(processar())
+        inicial = {"tipo": "progresso", "mensagem": "Hash do ZIP conferido. Iniciando extração...", "progresso": 10}
+        yield f"data: {json.dumps(inicial, ensure_ascii=False)}\n\n"
+        while not tarefa.done() or not fila.empty():
+            try:
+                evento = await asyncio.wait_for(fila.get(), timeout=0.5)
+                yield f"data: {json.dumps(evento, ensure_ascii=False)}\n\n"
+            except asyncio.TimeoutError:
+                continue
+        try:
+            resultado = tarefa.result()
+            evento = {"tipo": "concluido", "mensagem": "Importação concluída.", "progresso": 100, "resultado": resultado}
+        except HTTPException as erro:
+            detalhe = erro.detail
+            mensagem = detalhe if isinstance(detalhe, str) else detalhe.get("mensagem", "Falha ao importar o ZIP.")
+            evento = {"tipo": "erro", "mensagem": mensagem}
+            if isinstance(detalhe, dict) and "resultado" in detalhe:
+                evento["resultado"] = detalhe["resultado"]
+        except Exception:
+            evento = {"tipo": "erro", "mensagem": "Falha inesperada ao processar o ZIP."}
+        yield f"data: {json.dumps(evento, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        eventos(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/converter_relatorio_html")

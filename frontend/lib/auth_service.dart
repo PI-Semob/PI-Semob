@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiConfig {
   static String get baseUrl {
@@ -42,10 +43,22 @@ class UsuarioAutenticado {
 }
 
 class LoginResult {
-  const LoginResult({required this.mensagem, required this.usuario});
+  const LoginResult({
+    required this.mensagem,
+    required this.usuario,
+    required this.accessToken,
+  });
 
   final String mensagem;
   final UsuarioAutenticado usuario;
+  final String accessToken;
+}
+
+class SessaoSalva {
+  const SessaoSalva({required this.usuario, required this.accessToken});
+
+  final UsuarioAutenticado usuario;
+  final String accessToken;
 }
 
 class AuthService {
@@ -55,6 +68,47 @@ class AuthService {
 
   final http.Client _client;
   final String _baseUrl;
+
+  static const _chaveToken = 'access_token';
+  static const _chaveUsuarioId = 'usuario_id';
+  static const _chaveUsuarioNome = 'usuario_nome';
+  static const _chaveUsuarioEmail = 'usuario_email';
+
+  Future<void> salvarSessao(LoginResult resultado) async {
+    final preferencias = await SharedPreferences.getInstance();
+    await preferencias.setString(_chaveToken, resultado.accessToken);
+    await preferencias.setString(_chaveUsuarioId, resultado.usuario.id);
+    await preferencias.setString(_chaveUsuarioNome, resultado.usuario.nome);
+    await preferencias.setString(_chaveUsuarioEmail, resultado.usuario.email);
+  }
+
+  Future<SessaoSalva?> carregarSessao() async {
+    final preferencias = await SharedPreferences.getInstance();
+    final token = preferencias.getString(_chaveToken);
+    final id = preferencias.getString(_chaveUsuarioId);
+    final nome = preferencias.getString(_chaveUsuarioNome);
+    final email = preferencias.getString(_chaveUsuarioEmail);
+    if (token == null ||
+        token.isEmpty ||
+        id == null ||
+        nome == null ||
+        email == null) {
+      await limparSessao();
+      return null;
+    }
+    return SessaoSalva(
+      accessToken: token,
+      usuario: UsuarioAutenticado(id: id, nome: nome, email: email),
+    );
+  }
+
+  Future<void> limparSessao() async {
+    final preferencias = await SharedPreferences.getInstance();
+    await preferencias.remove(_chaveToken);
+    await preferencias.remove(_chaveUsuarioId);
+    await preferencias.remove(_chaveUsuarioNome);
+    await preferencias.remove(_chaveUsuarioEmail);
+  }
 
   Future<String> cadastrar({
     required String nome,
@@ -81,6 +135,19 @@ class AuthService {
     return resultado.mensagem;
   }
 
+  Future<String> alterarSenha({
+    required String accessToken,
+    required String senhaAtual,
+    required String novaSenha,
+  }) async {
+    final resposta = await _post(
+      '/usuarios/alterar-senha',
+      {'senha_atual': senhaAtual, 'nova_senha': novaSenha},
+      accessToken: accessToken,
+    );
+    return resposta['mensagem'] as String? ?? 'Senha alterada com sucesso.';
+  }
+
   Future<LoginResult> loginComUsuario({
     required String email,
     required String senha,
@@ -90,18 +157,22 @@ class AuthService {
       'senha': senha,
     });
     final usuario = resposta['usuario'];
+    final accessToken = resposta['access_token'];
     if (usuario is! Map<String, dynamic> ||
         usuario['id'] is! String ||
         (usuario['id'] as String).isEmpty ||
         usuario['nome'] is! String ||
         (usuario['nome'] as String).isEmpty ||
         usuario['email'] is! String ||
-        (usuario['email'] as String).isEmpty) {
+        (usuario['email'] as String).isEmpty ||
+        accessToken is! String ||
+        accessToken.isEmpty) {
       throw const AuthException('Resposta inválida do servidor.');
     }
     return LoginResult(
       mensagem:
           resposta['mensagem'] as String? ?? 'Login realizado com sucesso',
+      accessToken: accessToken,
       usuario: UsuarioAutenticado(
         id: usuario['id'] as String,
         nome: usuario['nome'] as String,
@@ -110,17 +181,18 @@ class AuthService {
     );
   }
 
-  Future<Map<String, dynamic>> _post(
-    String caminho,
-    Map<String, String> dados,
-  ) async {
+  Future<Map<String, dynamic>> _post(String caminho, Map<String, String> dados,
+      {String? accessToken}) async {
     late http.Response resposta;
 
     try {
       resposta = await _client
           .post(
             Uri.parse('$_baseUrl$caminho'),
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+              'Content-Type': 'application/json',
+              if (accessToken != null) 'Authorization': 'Bearer $accessToken',
+            },
             body: jsonEncode(dados),
           )
           .timeout(const Duration(seconds: 10));
