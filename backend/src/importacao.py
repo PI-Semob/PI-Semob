@@ -1,18 +1,18 @@
-"""Importação incremental dos relatórios HTML contidos em um ZIP."""
-
 import codecs
 import hashlib
 import json
 import stat
 import zipfile
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import PurePosixPath
+from typing import Callable
 
 import pandas as pd
 from fastapi import HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from pymongo import UpdateOne
-from pymongo.errors import BulkWriteError, PyMongoError
+from pymongo.errors import BulkWriteError, DuplicateKeyError, PyMongoError
 
 
 LIMITE_ZIP = 50 * 1024 * 1024
@@ -151,8 +151,77 @@ def inserir_lote(colecao, documentos):
         return inseridos, ignorados
 
 
-def importar_zip(arquivo, colecao, identificar_tratamento):
-    """Processa um membro por vez e envia lotes idempotentes ao MongoDB."""
+def reservar_zip(arquivo, colecao_hashes):
+    if not arquivo.filename or not arquivo.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Envie um arquivo ZIP")
+
+    arquivo.file.seek(0, 2)
+    tamanho = arquivo.file.tell()
+    arquivo.file.seek(0)
+    if tamanho == 0:
+        raise HTTPException(status_code=400, detail="Arquivo ZIP vazio")
+    if tamanho > LIMITE_ZIP:
+        raise HTTPException(status_code=413, detail="ZIP excede o limite de 50 MB")
+
+    resumo = hashlib.sha256()
+    while bloco := arquivo.file.read(64 * 1024):
+        resumo.update(bloco)
+    hash_zip = resumo.hexdigest()
+    arquivo.file.seek(0)
+
+    try:
+        with zipfile.ZipFile(arquivo.file) as compactado:
+            validar_entradas(compactado)
+    except (zipfile.BadZipFile, zipfile.LargeZipFile) as erro:
+        arquivo.file.seek(0)
+        raise HTTPException(status_code=400, detail="Arquivo ZIP inválido") from erro
+    finally:
+        arquivo.file.seek(0)
+
+    try:
+        colecao_hashes.create_index("hash_sha256", unique=True)
+        registro = colecao_hashes.insert_one({
+            "hash_sha256": hash_zip,
+            "nome_arquivo": arquivo.filename,
+            "status": "processando",
+            "iniciado_em": datetime.now(timezone.utc),
+        })
+    except DuplicateKeyError as erro:
+        raise HTTPException(
+            status_code=409,
+            detail="Este arquivo ZIP já foi importado anteriormente.",
+        ) from erro
+    except PyMongoError as erro:
+        raise HTTPException(
+            status_code=503,
+            detail="Não foi possível verificar o arquivo no banco de dados.",
+        ) from erro
+
+    arquivo.file.seek(0)
+    return registro.inserted_id
+
+
+def concluir_zip(colecao_hashes, id_registro):
+    colecao_hashes.update_one(
+        {"_id": id_registro},
+        {"$set": {"status": "concluido"}},
+    )
+
+
+def liberar_zip(colecao_hashes, id_registro):
+    colecao_hashes.delete_one({"_id": id_registro})
+
+
+def importar_zip(
+    arquivo,
+    colecao,
+    identificar_tratamento,
+    on_progresso: Callable[[str, int], None] | None = None,
+):
+    def avisar(mensagem, percentual):
+        if on_progresso:
+            on_progresso(mensagem, max(0, min(100, percentual)))
+
     if not arquivo.filename or not arquivo.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Envie um arquivo ZIP")
 
@@ -171,6 +240,8 @@ def importar_zip(arquivo, colecao, identificar_tratamento):
 
     with compactado:
         entradas = validar_entradas(compactado)
+        tamanho_total = max(1, sum(info.file_size for info in entradas))
+        bytes_processados = 0
         resultado = {
             "arquivo": arquivo.filename,
             "arquivos_processados": 0,
@@ -191,7 +262,8 @@ def importar_zip(arquivo, colecao, identificar_tratamento):
                 detail="Banco de dados indisponível para importação",
             ) from erro
 
-        for info in entradas:
+        avisar("Extraindo arquivos do ZIP...", 15)
+        for indice, info in enumerate(entradas, start=1):
             categoria, tratamento = identificar_tratamento(info.filename)
             detalhe = {
                 "arquivo": info.filename, "categoria": categoria,
@@ -253,8 +325,19 @@ def importar_zip(arquivo, colecao, identificar_tratamento):
                     detalhe["ignorados"] += ignorados
 
             try:
+                avisar(
+                    f"Processando arquivo {indice} de {len(entradas)}: {info.filename}",
+                    20 + int(bytes_processados / tamanho_total * 75),
+                )
                 with compactado.open(info) as membro:
                     while bloco := membro.read(64 * 1024):
+                        bytes_processados += len(bloco)
+                        percentual = 20 + int(bytes_processados / tamanho_total * 75)
+                        avisar(
+                            f"Processando arquivo {indice} de {len(entradas)}: "
+                            f"{info.filename}",
+                            percentual,
+                        )
                         leitor.feed(decodificador.decode(bloco))
                         for linha in leitor.linhas:
                             if lote and lote[-1][0] != linha[0]:
@@ -292,4 +375,5 @@ def importar_zip(arquivo, colecao, identificar_tratamento):
             resultado["ignorados"] += detalhe["ignorados"]
             resultado["rejeitados"] += detalhe["rejeitados"]
 
+        avisar("Finalizando a importação...", 98)
         return resultado

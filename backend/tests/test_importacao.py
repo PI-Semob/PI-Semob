@@ -3,15 +3,17 @@ import os
 import sys
 import unittest
 import zipfile
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from pymongo.errors import ServerSelectionTimeoutError
+from pymongo.errors import DuplicateKeyError, ServerSelectionTimeoutError
 
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
 os.environ.setdefault("DB_NAME", "semob_test")
+os.environ.setdefault("TOKEN_SECRET", "segredo-de-teste-nao-usar-em-producao")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import main
@@ -53,15 +55,34 @@ class ColecaoFalsa:
         return SimpleNamespace(upserted_count=inseridos, matched_count=ignorados)
 
 
+class ColecaoHashes:
+    def __init__(self): self.hashes = {}
+    def create_index(self, *args, **kwargs): return "hash_sha256_1"
+    def insert_one(self, documento):
+        chave = documento["hash_sha256"]
+        if chave in self.hashes: raise DuplicateKeyError("duplicate")
+        self.hashes[chave] = documento
+        return SimpleNamespace(inserted_id=chave)
+    def update_one(self, filtro, atualizacao): pass
+    def delete_one(self, filtro): self.hashes.pop(filtro["_id"], None)
+
+
+def eventos_sse(resposta):
+    return [json.loads(linha[6:]) for linha in resposta.text.splitlines() if linha.startswith("data: ")]
+
+
 class TesteImportacao(unittest.TestCase):
     def setUp(self):
         self.colecao_original = main.colecao_relatorios_mensais
+        self.hashes_original = main.colecao_zips_processados
         self.colecao = ColecaoFalsa()
         main.colecao_relatorios_mensais = self.colecao
+        main.colecao_zips_processados = ColecaoHashes()
         self.cliente = TestClient(main.app)
 
     def tearDown(self):
         main.colecao_relatorios_mensais = self.colecao_original
+        main.colecao_zips_processados = self.hashes_original
 
     def enviar(self, conteudo, nome="dados.zip"):
         return self.cliente.post(
@@ -75,9 +96,9 @@ class TesteImportacao(unittest.TestCase):
         resposta = self.enviar(arquivo)
 
         self.assertEqual(resposta.status_code, 200, resposta.text)
-        self.assertEqual(resposta.json()["inseridos"], 2)
-        self.assertEqual(resposta.json()["ignorados"], 0)
-        self.assertEqual(resposta.json()["rejeitados"], 0)
+        self.assertEqual((eventos_sse(resposta)[-1]["resultado"]["inseridos"]), 2)
+        self.assertEqual((eventos_sse(resposta)[-1]["resultado"]["ignorados"]), 0)
+        self.assertEqual((eventos_sse(resposta)[-1]["resultado"]["rejeitados"]), 0)
         documentos = list(self.colecao.documentos.values())
         self.assertEqual(documentos[0]["dados_originais"], {
             "Mês": "2026-08", "Dia": "01", "Total Passageiros": "16.544"
@@ -116,15 +137,15 @@ class TesteImportacao(unittest.TestCase):
         self.assertEqual(tratado["passageiros_nao_pagantes"], 10700)
         self.assertEqual(tratado["total_passageiros"], 16544)
 
-    def test_reimportacao_ignora_documentos_ja_inseridos(self):
+    def test_reimportacao_do_mesmo_zip_retorna_conflito(self):
         arquivo = criar_zip({"Agosto_2026/Mensal/Passageiros_Mensal.html": HTML_PASSAGEIROS})
 
-        self.assertEqual(self.enviar(arquivo).json()["inseridos"], 2)
+        primeira = self.enviar(arquivo)
+        self.assertEqual(eventos_sse(primeira)[-1]["resultado"]["inseridos"], 2)
         segunda = self.enviar(arquivo)
 
-        self.assertEqual(segunda.status_code, 200)
-        self.assertEqual(segunda.json()["inseridos"], 0)
-        self.assertEqual(segunda.json()["ignorados"], 2)
+        self.assertEqual(segunda.status_code, 409)
+        self.assertIn("já foi importado", segunda.json()["detail"])
         self.assertEqual(len(self.colecao.documentos), 2)
 
     def test_processa_duas_tabelas_de_saldos_sem_mesclar_linhas(self):
@@ -136,7 +157,7 @@ class TesteImportacao(unittest.TestCase):
         resposta = self.enviar(criar_zip({"Saldos.html": html}))
 
         self.assertEqual(resposta.status_code, 200, resposta.text)
-        self.assertEqual(resposta.json()["inseridos"], 2)
+        self.assertEqual((eventos_sse(resposta)[-1]["resultado"]["inseridos"]), 2)
         documentos = list(self.colecao.documentos.values())
         self.assertEqual(documentos[0]["dados_originais"]["Saldo Final"], "20.434.667,35")
         self.assertEqual(documentos[1]["dados_originais"]["Total Vendas"], "4.805,00")
@@ -150,8 +171,8 @@ class TesteImportacao(unittest.TestCase):
         resposta = self.enviar(criar_zip({"Passageiros.html": html}))
 
         self.assertEqual(resposta.status_code, 200)
-        self.assertEqual(resposta.json()["inseridos"], 2)
-        self.assertEqual(resposta.json()["rejeitados"], 1)
+        self.assertEqual((eventos_sse(resposta)[-1]["resultado"]["inseridos"]), 2)
+        self.assertEqual((eventos_sse(resposta)[-1]["resultado"]["rejeitados"]), 1)
         self.assertEqual(len(self.colecao.documentos), 2)
 
     def test_bloqueia_caminho_inseguro_antes_de_inserir(self):
@@ -184,7 +205,8 @@ class TesteImportacao(unittest.TestCase):
 
         resposta = self.enviar(criar_zip({"Passageiros.html": HTML_PASSAGEIROS}))
 
-        self.assertEqual(resposta.status_code, 503)
+        self.assertEqual(resposta.status_code, 200)
+        self.assertEqual(eventos_sse(resposta)[-1]["tipo"], "erro")
         self.assertNotIn("segredo interno", resposta.text)
 
 
