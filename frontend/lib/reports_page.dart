@@ -1,5 +1,8 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 
 import 'reports_service.dart';
@@ -10,10 +13,12 @@ const _cinzaTexto = Color(0xFF667D95);
 const _fundoCard = Color(0xFFF8FAFD);
 
 class ReportsPage extends StatefulWidget {
-  const ReportsPage({super.key, this.service, this.revision = 0});
+  const ReportsPage(
+      {super.key, this.service, this.revision = 0, this.accessToken});
 
   final RelatoriosService? service;
   final int revision;
+  final String? accessToken;
 
   @override
   State<ReportsPage> createState() => _ReportsPageState();
@@ -30,17 +35,26 @@ class _ReportsPageState extends State<ReportsPage> {
   String _linhaAplicada = '';
   String? _erroFiltros;
   String? _erroPagina;
+  String? _erroResumo;
   bool _carregandoFiltros = true;
   bool _carregandoPagina = true;
+  bool _carregandoResumo = true;
+  bool _exportando = false;
+  ResumoRelatorios? _resumo;
+  String _granularidade = 'diaria';
+  DateTimeRange? _intervalo;
   int _ultimaConsulta = 0;
   int _ultimaConsultaFiltros = 0;
+  int _ultimaConsultaResumo = 0;
 
   @override
   void initState() {
     super.initState();
-    _service = widget.service ?? RelatoriosService();
+    _service =
+        widget.service ?? RelatoriosService(accessToken: widget.accessToken);
     _carregarFiltros();
     _carregarPagina(1);
+    _carregarResumo();
   }
 
   @override
@@ -70,6 +84,7 @@ class _ReportsPageState extends State<ReportsPage> {
       });
     }
     await _carregarPagina(1);
+    await _carregarResumo();
   }
 
   @override
@@ -127,6 +142,85 @@ class _ReportsPageState extends State<ReportsPage> {
   void _aplicarFiltros() {
     _linhaAplicada = _linha.text.trim();
     _carregarPagina(1);
+    _carregarResumo();
+  }
+
+  Future<void> _carregarResumo() async {
+    final consulta = ++_ultimaConsultaResumo;
+    if (mounted) {
+      setState(() {
+        _carregandoResumo = true;
+        _erroResumo = null;
+      });
+    }
+    try {
+      final resumo = await _service.resumo(
+        granularidade: _granularidade,
+        inicio: _intervalo?.start,
+        fim: _intervalo?.end,
+        linha: _linhaAplicada,
+      );
+      if (mounted && consulta == _ultimaConsultaResumo) {
+        setState(() => _resumo = resumo);
+      }
+    } on RelatoriosException catch (erro) {
+      if (mounted && consulta == _ultimaConsultaResumo) {
+        setState(() => _erroResumo = erro.mensagem);
+      }
+    } finally {
+      if (mounted && consulta == _ultimaConsultaResumo) {
+        setState(() => _carregandoResumo = false);
+      }
+    }
+  }
+
+  Future<void> _selecionarIntervalo() async {
+    final agora = DateTime.now();
+    final intervalo = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2010),
+      lastDate: agora.add(const Duration(days: 365)),
+      initialDateRange: _intervalo ??
+          DateTimeRange(
+            start: DateTime(agora.year, agora.month, 1),
+            end: agora,
+          ),
+      helpText: 'Selecione o intervalo dos indicadores',
+    );
+    if (intervalo == null || !mounted) return;
+    setState(() => _intervalo = intervalo);
+    _carregarResumo();
+  }
+
+  Future<void> _exportarCsv() async {
+    setState(() => _exportando = true);
+    try {
+      final bytes = await _service.exportarCsv(
+        tipo: _tipo,
+        periodo: _periodo,
+        linha: _linhaAplicada,
+        abrangencia: _abrangencia,
+      );
+      final arquivo = await FilePicker.platform.saveFile(
+        fileName: 'relatorios_semob.csv',
+        type: FileType.custom,
+        allowedExtensions: ['csv'],
+        bytes: Uint8List.fromList(bytes),
+      );
+      if (arquivo != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('CSV exportado com sucesso.')),
+        );
+      }
+    } on RelatoriosException catch (erro) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(erro.mensagem)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _exportando = false);
+    }
   }
 
   String _rotuloPeriodo(String periodo) {
@@ -285,10 +379,309 @@ class _ReportsPageState extends State<ReportsPage> {
     );
   }
 
+  Widget _controlesGerenciais() {
+    final intervaloTexto = _intervalo == null
+        ? 'Todo o histórico'
+        : '${_intervalo!.start.toString().substring(0, 10)} a ${_intervalo!.end.toString().substring(0, 10)}';
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        SizedBox(
+            width: 180,
+            child: DropdownButtonFormField<String>(
+              initialValue: _granularidade,
+              decoration: const InputDecoration(labelText: 'Granularidade'),
+              items: const [
+                DropdownMenuItem(value: 'diaria', child: Text('Diária')),
+                DropdownMenuItem(value: 'semanal', child: Text('Semanal')),
+                DropdownMenuItem(value: 'mensal', child: Text('Mensal')),
+              ],
+              onChanged: (valor) {
+                if (valor == null) return;
+                setState(() => _granularidade = valor);
+                _carregarResumo();
+              },
+            )),
+        OutlinedButton.icon(
+          onPressed: _selecionarIntervalo,
+          icon: const Icon(Icons.date_range),
+          label: Text(intervaloTexto),
+        ),
+      ],
+    );
+  }
+
+  Widget _botaoExportacao() => FilledButton.icon(
+        onPressed: _exportando ? null : _exportarCsv,
+        icon: _exportando
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2))
+            : const Icon(Icons.download),
+        label: const Text('Exportar CSV dos registros filtrados'),
+      );
+
   String _valor(dynamic valor) {
     if (valor == null) return '—';
     if (valor is Map || valor is List) return jsonEncode(valor);
     return valor.toString();
+  }
+
+  String _valorIndicador(String campo, {bool decimal = false}) {
+    final valor = _resumo?.indicadores[campo];
+    if (valor is! num) return 'N/D';
+    return decimal ? valor.toStringAsFixed(2) : valor.round().toString();
+  }
+
+  Widget _cartaoIndicador(String titulo, String valor, IconData icone) {
+    return SizedBox(
+      width: 220,
+      child: Card(
+        color: _fundoCard,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: const BorderSide(color: Color(0xFFD4E0ED)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(children: [
+            Icon(icone, color: _azulPrincipal),
+            const SizedBox(width: 12),
+            Expanded(
+                child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(titulo,
+                    style: const TextStyle(color: _cinzaTexto, fontSize: 12)),
+                const SizedBox(height: 5),
+                Text(valor,
+                    style: const TextStyle(
+                        color: _azulEscuro,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold)),
+              ],
+            )),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _cartoesResumo() {
+    if (_resumo?.serie.isEmpty ?? true) {
+      return const Card(
+          child: Padding(
+        padding: EdgeInsets.all(18),
+        child: Text('Não há registros para o intervalo selecionado.'),
+      ));
+    }
+    return Wrap(spacing: 10, runSpacing: 10, children: [
+      _cartaoIndicador(
+          'Quilometragem',
+          '${_valorIndicador('quilometragem_km', decimal: true)} km',
+          Icons.route),
+      _cartaoIndicador('Viagens realizadas',
+          _valorIndicador('viagens_realizadas'), Icons.directions_bus),
+      _cartaoIndicador('Passageiros pagantes',
+          _valorIndicador('passageiros_pagantes'), Icons.people_alt_outlined),
+      _cartaoIndicador('Não pagantes',
+          _valorIndicador('passageiros_nao_pagantes'), Icons.people_outline),
+      _cartaoIndicador(
+          'Vendas',
+          'R\$ ${_valorIndicador('total_vendas', decimal: true)}',
+          Icons.payments_outlined),
+      _cartaoIndicador(
+          'Utilização financeira',
+          'R\$ ${_valorIndicador('total_utilizacao', decimal: true)}',
+          Icons.account_balance_wallet_outlined),
+      _cartaoIndicador(
+          'Saldo final',
+          'R\$ ${_valorIndicador('saldo_final', decimal: true)}',
+          Icons.account_balance_outlined),
+    ]);
+  }
+
+  List<FlSpot> _pontos(String campo) {
+    final serie = _resumo?.serie ?? const [];
+    return [
+      for (var i = 0; i < serie.length; i++)
+        if ((serie[i]['dias_operacao'] as num? ?? 0) > 0 &&
+            serie[i][campo] is num)
+          FlSpot(i.toDouble(), (serie[i][campo] as num).toDouble()),
+    ];
+  }
+
+  Widget _grafico(
+      String titulo, List<LineChartBarData> linhas, List<String> legendas) {
+    final serie = _resumo?.serie ?? const [];
+    if (serie.length < 2) return const SizedBox.shrink();
+    return Card(
+      color: _fundoCard,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(titulo,
+              style: const TextStyle(
+                  color: _azulEscuro,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16)),
+          const SizedBox(height: 14),
+          SizedBox(
+              height: 230,
+              child: LineChart(LineChartData(
+                lineBarsData: linhas,
+                titlesData: FlTitlesData(
+                  topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                    showTitles: true,
+                    interval: (serie.length / 4)
+                        .ceilToDouble()
+                        .clamp(1, double.infinity)
+                        .toDouble(),
+                    reservedSize: 28,
+                    getTitlesWidget: (valor, meta) {
+                      final indice = valor.toInt();
+                      if (indice < 0 ||
+                          indice >= serie.length ||
+                          valor != indice) {
+                        return const SizedBox.shrink();
+                      }
+                      final rotulo = serie[indice]['periodo']?.toString() ?? '';
+                      return SideTitleWidget(
+                        meta: meta,
+                        child: Text(
+                            rotulo.length > 7 ? rotulo.substring(5) : rotulo,
+                            style: const TextStyle(
+                                fontSize: 9, color: _cinzaTexto)),
+                      );
+                    },
+                  )),
+                  leftTitles: const AxisTitles(
+                      sideTitles:
+                          SideTitles(showTitles: true, reservedSize: 38)),
+                ),
+                borderData: FlBorderData(show: false),
+                gridData: const FlGridData(show: true, drawVerticalLine: false),
+              ))),
+          Wrap(spacing: 14, children: [
+            for (var i = 0; i < linhas.length; i++)
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Container(width: 12, height: 3, color: linhas[i].color),
+                const SizedBox(width: 5),
+                Text(legendas[i], style: const TextStyle(fontSize: 11)),
+              ]),
+          ]),
+          Text('Granularidade $_granularidade; ${serie.length} períodos',
+              style: const TextStyle(color: _cinzaTexto, fontSize: 12)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _graficosResumo() {
+    final serie = _resumo?.serie ?? const [];
+    if (serie.length < 2) return const SizedBox.shrink();
+    return Column(children: [
+      _grafico(
+          'Viagens programadas e realizadas',
+          [
+            if (_linhaAplicada.isEmpty)
+              LineChartBarData(
+                  spots: _pontos('viagens_programadas'),
+                  color: const Color(0xFF79A9CF),
+                  dotData: const FlDotData(show: false),
+                  barWidth: 3),
+            LineChartBarData(
+                spots: _pontos('viagens_realizadas'),
+                color: _azulPrincipal,
+                dotData: const FlDotData(show: false),
+                barWidth: 3),
+          ],
+          _linhaAplicada.isEmpty
+              ? const ['Programadas', 'Realizadas']
+              : const ['Realizadas']),
+      _grafico('Evolução da quilometragem', [
+        LineChartBarData(
+            spots: _pontos('quilometragem_km'),
+            color: const Color(0xFF00A878),
+            dotData: const FlDotData(show: false),
+            barWidth: 3),
+      ], const [
+        'Quilômetros'
+      ]),
+    ]);
+  }
+
+  Widget _alertas() {
+    final serie = _resumo?.serie ?? const [];
+    final alertas = <String>[];
+    for (var i = 1; i < serie.length; i++) {
+      final anterior = serie[i - 1];
+      final atual = serie[i];
+      final viagensAnt = anterior['viagens_realizadas'] as num?;
+      final viagensAtu = atual['viagens_realizadas'] as num?;
+      final temOperacaoAnt = (anterior['dias_operacao'] as num? ?? 0) > 0;
+      final temOperacaoAtu = (atual['dias_operacao'] as num? ?? 0) > 0;
+      if (temOperacaoAnt &&
+          temOperacaoAtu &&
+          viagensAnt != null &&
+          viagensAnt > 0 &&
+          viagensAtu != null &&
+          (viagensAtu - viagensAnt) / viagensAnt <= -0.20) {
+        alertas
+            .add('Queda de pelo menos 20% nas viagens em ${atual['periodo']}.');
+      }
+      final kmAnt = anterior['quilometragem_km'] as num?;
+      final kmAtu = atual['quilometragem_km'] as num?;
+      if (temOperacaoAnt &&
+          temOperacaoAtu &&
+          kmAnt != null &&
+          kmAnt > 0 &&
+          kmAtu != null &&
+          ((kmAtu - kmAnt) / kmAnt).abs() >= 0.25) {
+        alertas.add(
+            'Variação de pelo menos 25% na quilometragem em ${atual['periodo']}.');
+      }
+    }
+    return Card(
+      color: const Color(0xFFFFF8E8),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Sinais para análise',
+              style: TextStyle(
+                  color: _azulEscuro,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16)),
+          const SizedBox(height: 6),
+          const Text(
+              'Regras iniciais: queda de viagens ≥20% ou variação de km ≥25% frente ao período anterior.',
+              style: TextStyle(color: _cinzaTexto, fontSize: 12)),
+          const SizedBox(height: 8),
+          if (alertas.isEmpty)
+            const Text(
+                'Nenhum desvio acima dos limites foi encontrado na série atual.')
+          else
+            ...alertas.map((texto) => Padding(
+                  padding: const EdgeInsets.only(top: 5),
+                  child: Row(children: [
+                    const Icon(Icons.warning_amber,
+                        color: Color(0xFFB7791F), size: 19),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(texto)),
+                  ]),
+                )),
+        ]),
+      ),
+    );
   }
 
   Widget _campoDetalhe(MapEntry<String, dynamic> campo) {
@@ -530,6 +923,58 @@ class _ReportsPageState extends State<ReportsPage> {
                     'Consulte os dados importados por período, tipo e linha.',
                     style: TextStyle(color: _cinzaTexto, fontSize: 14)),
                 const SizedBox(height: 24),
+                const Text('Resumo gerencial',
+                    style: TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.bold,
+                      color: _azulEscuro,
+                    )),
+                const SizedBox(height: 12),
+                _controlesGerenciais(),
+                const SizedBox(height: 14),
+                if (_carregandoResumo)
+                  const LinearProgressIndicator()
+                else if (_erroResumo != null)
+                  Text(_erroResumo!,
+                      style: const TextStyle(color: Color(0xFFB42318)))
+                else if (_resumo != null) ...[
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 10),
+                    child: Text(
+                      'Pagantes = catraca + antecipados, conforme os campos importados. Confirme a regra de negócio com a SEMOB antes de usar os totais como referência oficial.',
+                      style: TextStyle(color: _cinzaTexto, fontSize: 12),
+                    ),
+                  ),
+                  if (_linhaAplicada.isNotEmpty)
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 10),
+                      child: Text(
+                        'Com filtro por linha, passageiros e valores financeiros não são exibidos porque os relatórios importados não identificam esses dados por linha.',
+                        style: TextStyle(color: _cinzaTexto, fontSize: 12),
+                      ),
+                    ),
+                  _cartoesResumo(),
+                  const SizedBox(height: 12),
+                  _alertas(),
+                  const SizedBox(height: 12),
+                  _graficosResumo(),
+                ],
+                const SizedBox(height: 24),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 10,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    const Text('Registros detalhados',
+                        style: TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.bold,
+                          color: _azulEscuro,
+                        )),
+                    _botaoExportacao(),
+                  ],
+                ),
+                const SizedBox(height: 12),
                 _controles(),
                 const SizedBox(height: 24),
                 _resultados(),
