@@ -9,8 +9,10 @@ void main() {
   test('consulta opções e resumo filtrado sem buscar documentos brutos',
       () async {
     final caminhos = <Uri>[];
+    final cabecalhos = <Map<String, String>>[];
     final cliente = MockClient((request) async {
       caminhos.add(request.url);
+      cabecalhos.add(request.headers);
       if (request.url.path == '/dashboard/opcoes') {
         return http.Response(
           jsonEncode({
@@ -57,6 +59,7 @@ void main() {
     final servico = DashboardService(
       client: cliente,
       baseUrl: 'http://localhost:8000',
+      accessToken: 'token-de-teste',
     );
 
     final opcoes = await servico.buscarOpcoes();
@@ -78,6 +81,7 @@ void main() {
       'periodo': '2026-08',
       'abrangencia': 'Mensal',
     });
+    expect(cabecalhos, everyElement(containsPair('Authorization', 'Bearer token-de-teste')));
   });
 
   test('expõe erro HTTP sem dados de servidor no dashboard', () async {

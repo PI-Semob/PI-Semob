@@ -6,9 +6,15 @@ import 'dashboard_visuals.dart';
 const _textoSuave = Color(0xFF667D95);
 
 class DashboardPage extends StatefulWidget {
-  const DashboardPage({super.key, this.service, this.revision = 0});
+  const DashboardPage({
+    super.key,
+    this.service,
+    this.accessToken,
+    this.revision = 0,
+  });
 
   final DashboardService? service;
+  final String? accessToken;
   final int revision;
 
   @override
@@ -30,7 +36,7 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
-    _service = widget.service ?? DashboardService();
+    _service = widget.service ?? DashboardService(accessToken: widget.accessToken);
     _carregarOpcoes();
   }
 

@@ -5,21 +5,20 @@ import 'dashboard_page.dart';
 import 'login.dart';
 import 'operation_page.dart';
 import 'reports_page.dart';
-import 'settings_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({
     super.key,
     required this.usuario,
+    this.accessToken,
     this.authService,
-    this.verificarApi,
     this.dashboardPage,
     this.reportsPage,
   });
 
   final UsuarioAutenticado usuario;
+  final String? accessToken;
   final AuthService? authService;
-  final Future<StatusSistema> Function()? verificarApi;
   final Widget? dashboardPage;
   final Widget? reportsPage;
 
@@ -31,6 +30,7 @@ class _HomePageState extends State<HomePage> {
   int _secaoAtual = 0;
   int _revisaoDados = 0;
   final Set<int> _secoesVisitadas = {0};
+  final _formSenha = GlobalKey<FormState>();
 
   void _dadosImportados() {
     setState(() => _revisaoDados++);
@@ -45,13 +45,112 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  void _sair() {
+  Future<void> _sair() async {
+    await (widget.authService ?? AuthService()).limparSessao();
+    if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(
         builder: (_) => LoginPage(authService: widget.authService),
       ),
       (_) => false,
     );
+  }
+
+  Future<void> _alterarSenha() async {
+    final senhaAtual = TextEditingController();
+    final novaSenha = TextEditingController();
+    var carregando = false;
+
+    try {
+      final alterada = await showDialog<bool>(
+        context: context,
+        builder: (contexto) => StatefulBuilder(
+          builder: (contexto, atualizarDialogo) => AlertDialog(
+            title: const Text('Alterar senha'),
+            content: Form(
+              key: _formSenha,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextFormField(
+                    controller: senhaAtual,
+                    obscureText: true,
+                    decoration: const InputDecoration(labelText: 'Senha atual'),
+                    validator: (valor) => valor == null || valor.isEmpty
+                        ? 'Digite sua senha atual.'
+                        : null,
+                  ),
+                  TextFormField(
+                    controller: novaSenha,
+                    obscureText: true,
+                    decoration: const InputDecoration(labelText: 'Nova senha'),
+                    validator: (valor) => valor == null || valor.length < 8
+                        ? 'A nova senha deve ter pelo menos 8 caracteres.'
+                        : null,
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed:
+                    carregando ? null : () => Navigator.of(contexto).pop(false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: carregando
+                    ? null
+                    : () async {
+                        if (!_formSenha.currentState!.validate()) return;
+                        atualizarDialogo(() => carregando = true);
+                        try {
+                          await (widget.authService ?? AuthService())
+                              .alterarSenha(
+                            accessToken: widget.accessToken ?? '',
+                            senhaAtual: senhaAtual.text,
+                            novaSenha: novaSenha.text,
+                          );
+                          if (contexto.mounted) {
+                            Navigator.of(contexto).pop(true);
+                          }
+                        } on AuthException catch (erro) {
+                          if (!contexto.mounted) return;
+                          atualizarDialogo(() => carregando = false);
+                          ScaffoldMessenger.of(contexto).showSnackBar(
+                            SnackBar(content: Text(erro.mensagem)),
+                          );
+                        } catch (_) {
+                          if (!contexto.mounted) return;
+                          atualizarDialogo(() => carregando = false);
+                          ScaffoldMessenger.of(contexto).showSnackBar(
+                            const SnackBar(
+                              content:
+                                  Text('Não foi possível alterar a senha.'),
+                            ),
+                          );
+                        }
+                      },
+                child: carregando
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('Salvar'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (alterada == true && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Senha alterada com sucesso.')),
+        );
+      }
+    } finally {
+      senhaAtual.dispose();
+      novaSenha.dispose();
+    }
   }
 
   @override
@@ -65,7 +164,6 @@ class _HomePageState extends State<HomePage> {
               _itemMenu(0, Icons.dashboard_outlined, 'Dashboard'),
               _itemMenu(1, Icons.directions_bus_outlined, 'Operação'),
               _itemMenu(2, Icons.analytics_outlined, 'Relatórios'),
-              _itemMenu(3, Icons.settings_outlined, 'Configurações'),
             ],
           ),
         ),
@@ -79,20 +177,19 @@ class _HomePageState extends State<HomePage> {
                 index: _secaoAtual,
                 children: [
                   widget.dashboardPage ??
-                      DashboardPage(revision: _revisaoDados),
+                      DashboardPage(
+                        accessToken: widget.accessToken,
+                        revision: _revisaoDados,
+                      ),
                   _secoesVisitadas.contains(1)
                       ? OperationPage(onDataImported: _dadosImportados)
                       : const SizedBox.shrink(),
                   _secoesVisitadas.contains(2)
                       ? widget.reportsPage ??
-                          ReportsPage(revision: _revisaoDados)
-                      : const SizedBox.shrink(),
-                  _secoesVisitadas.contains(3)
-                      ? SettingsPage(
-                          usuario: widget.usuario,
-                          onLogout: _sair,
-                          verificarApi: widget.verificarApi,
-                        )
+                          ReportsPage(
+                            revision: _revisaoDados,
+                            accessToken: widget.accessToken,
+                          )
                       : const SizedBox.shrink(),
                 ],
               ),
@@ -165,13 +262,38 @@ class _HomePageState extends State<HomePage> {
                   ],
                 ),
               ),
-              const CircleAvatar(
-                radius: 21,
-                backgroundColor: Colors.white,
-                child: Icon(
-                  Icons.person_outline,
-                  color: Color(0xFF1976B9),
-                  size: 24,
+              PopupMenuButton<String>(
+                tooltip: 'Opções da conta',
+                onSelected: (opcao) {
+                  if (opcao == 'senha') _alterarSenha();
+                  if (opcao == 'sair') _sair();
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(
+                    value: 'senha',
+                    child: ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.lock_outline),
+                      title: Text('Alterar Senha'),
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'sair',
+                    child: ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.logout),
+                      title: Text('Sair (Logout)'),
+                    ),
+                  ),
+                ],
+                child: const CircleAvatar(
+                  radius: 21,
+                  backgroundColor: Colors.white,
+                  child: Icon(
+                    Icons.person_outline,
+                    color: Color(0xFF1976B9),
+                    size: 24,
+                  ),
                 ),
               ),
             ],

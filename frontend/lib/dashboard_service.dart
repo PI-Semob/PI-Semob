@@ -94,12 +94,14 @@ class DashboardResumo {
 }
 
 class DashboardService {
-  DashboardService({http.Client? client, String? baseUrl})
+  DashboardService({http.Client? client, String? baseUrl, String? accessToken})
       : _client = client ?? http.Client(),
-        _baseUrl = baseUrl ?? ApiConfig.baseUrl;
+        _baseUrl = baseUrl ?? ApiConfig.baseUrl,
+        _accessToken = accessToken;
 
   final http.Client _client;
   final String _baseUrl;
+  final String? _accessToken;
 
   Future<DashboardOpcoes> buscarOpcoes() async {
     final corpo = await _get('/dashboard/opcoes');
@@ -180,8 +182,12 @@ class DashboardService {
     try {
       final uri =
           Uri.parse('$_baseUrl$caminho').replace(queryParameters: parametros);
-      final resposta =
-          await _client.get(uri).timeout(const Duration(seconds: 20));
+      final cabecalhos = _accessToken == null
+          ? <String, String>{}
+          : {'Authorization': 'Bearer $_accessToken'};
+      final resposta = await _client
+          .get(uri, headers: cabecalhos)
+          .timeout(const Duration(seconds: 20));
       if (resposta.statusCode < 200 || resposta.statusCode >= 300) {
         throw const DashboardException('Não foi possível carregar os dados.');
       }
