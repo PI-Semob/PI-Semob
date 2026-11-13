@@ -84,6 +84,58 @@ void main() {
     expect(cabecalhos, everyElement(containsPair('Authorization', 'Bearer token-de-teste')));
   });
 
+  test('envia todos os filtros combinados e omite filtros globais', () async {
+    final urls = <Uri>[];
+    final cliente = MockClient((request) async {
+      urls.add(request.url);
+      return http.Response(
+        jsonEncode({
+          'periodo': 'Todos os períodos',
+          'abrangencia': null,
+          'indicadores': {
+            'viagens_programadas': 10,
+            'viagens_realizadas': 9,
+            'quilometragem_total': 50.5,
+            'total_passageiros': 100,
+            'dias_com_dados': 1,
+          },
+          'evolucao': [],
+          'faixas_horarias': [],
+          'linhas': [],
+        }),
+        200,
+      );
+    });
+    final servico = DashboardService(
+      client: cliente,
+      baseUrl: 'http://localhost:8000',
+    );
+
+    await servico.buscarResumo(
+      inicio: DateTime(2026, 7, 1),
+      fim: DateTime(2026, 7, 5),
+      linhas: const ['01', '02'],
+      diasSemana: const [1, 3],
+      horaInicio: 6,
+      horaFim: 9,
+    );
+    await servico.buscarResumo();
+
+    expect(urls[0].toString(), contains(
+      '/dashboard/resumo?inicio=2026-07-01&fim=2026-07-05&linhas=01%2C02&dias=1%2C3&hora_inicio=6&hora_fim=9',
+    ));
+    expect(urls[0].queryParameters, {
+      'inicio': '2026-07-01',
+      'fim': '2026-07-05',
+      'linhas': '01,02',
+      'dias': '1,3',
+      'hora_inicio': '6',
+      'hora_fim': '9',
+    });
+    expect(urls[1].path, '/dashboard/resumo');
+    expect(urls[1].queryParameters, isEmpty);
+  });
+
   test('expõe erro HTTP sem dados de servidor no dashboard', () async {
     final servico = DashboardService(
       client: MockClient((_) async => http.Response('{"detail":"falha"}', 503)),

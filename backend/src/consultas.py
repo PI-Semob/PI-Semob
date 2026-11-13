@@ -1,4 +1,5 @@
 import re
+import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
@@ -10,6 +11,7 @@ MESES = {
 }
 PADRAO_CAMINHO = re.compile(r"(?:^|/)([^/]+)_(\d{4})/(Mensal|Quinzenal)/", re.I)
 ABRANGENCIAS = ("Mensal", "Quinzenal")
+_logger = logging.getLogger(__name__)
 
 
 def periodo_abrangencia_do_arquivo(caminho):
@@ -47,6 +49,13 @@ def opcoes_dashboard(colecao):
         "periodos": periodos,
         "periodo_padrao": periodos[0]["periodo"] if periodos else None,
         "abrangencia_padrao": periodos[0]["abrangencias"][0] if periodos else None,
+        "linhas": sorted({
+            linha
+            for categoria in ("linhas", "fxhr")
+            for linha in colecao.distinct(
+                "dados_tratados.linha", {"categoria": categoria}
+            ) if isinstance(linha, str) and linha.strip()
+        }),
     }
 
 
@@ -268,18 +277,99 @@ def proximo_periodo(periodo):
     return f"{ano + (mes == 12)}-{(mes % 12) + 1:02d}"
 
 
-def resumo_dashboard(colecao, periodo, abrangencia):
-    arquivos = arquivos_filtrados(arquivos_e_periodos(colecao), periodo, abrangencia)
-    faixa_de_datas = {"$gte": periodo, "$lt": proximo_periodo(periodo)}
+def _filtro_datas_dashboard(periodo, inicio=None, fim=None):
+    """Combina o mês selecionado com limites de data opcionais."""
+    limites = {}
+    if periodo:
+        limites = {"$gte": f"{periodo}-01", "$lt": f"{proximo_periodo(periodo)}-01"}
+    if inicio:
+        limites["$gte"] = max(limites.get("$gte", inicio.isoformat()), inicio.isoformat())
+    if fim:
+        limite_fim = (fim + timedelta(days=1)).isoformat()
+        limites["$lt"] = min(limites.get("$lt", limite_fim), limite_fim)
+    return limites
+
+
+def _estagios_dias_semana(dias_semana):
+    """Filtra dias ISO (segunda=1 ... domingo=7) em campos ISO de data."""
+    if not dias_semana:
+        return []
+    dias_mongo = sorted({(dia % 7) + 1 for dia in dias_semana})
+    return [
+        {"$addFields": {"_data_dashboard": {"$dateFromString": {
+            "dateString": {"$substrBytes": ["$dados_tratados.data", 0, 10]},
+            "format": "%Y-%m-%d", "onError": None, "onNull": None,
+        }}}},
+        {"$match": {"$expr": {"$in": [
+            {"$dayOfWeek": "$_data_dashboard"}, dias_mongo,
+        ]}}},
+    ]
+
+
+def _estagio_hora_dashboard():
+    """Extrai a hora inicial de faixas textuais ou numéricas."""
+    return {"$addFields": {"_hora_dashboard": {"$convert": {
+        "input": {"$let": {"vars": {"captura": {"$regexFind": {
+            "input": {"$convert": {
+                "input": "$dados_tratados.faixa_horaria",
+                "to": "string", "onError": "", "onNull": "",
+            }},
+            "regex": "[0-9]{1,2}",
+        }}}, "in": "$$captura.match"}},
+        "to": "int", "onError": None, "onNull": None,
+    }}}}
+
+
+def _executar_pipeline_dashboard(colecao, nome, pipeline):
+    """Registra os filtros montados e executa uma agregação do Dashboard."""
+    filtros = [estagio["$match"] for estagio in pipeline if "$match" in estagio]
+    _logger.debug("Filtros MongoDB do Dashboard (%s): %r", nome, filtros)
+    return list(colecao.aggregate(pipeline))
+
+
+def resumo_dashboard(colecao, periodo, abrangencia, inicio=None, fim=None,
+                    dias_semana=None, linhas=None, hora_inicio=None,
+                    hora_fim=None):
+    por_periodo = arquivos_e_periodos(colecao)
+    periodo_arquivos = None if inicio and fim else periodo
+    limitar_arquivos = periodo_arquivos is not None or abrangencia is not None
+    arquivos = (
+        arquivos_filtrados(por_periodo, periodo_arquivos, abrangencia)
+        if limitar_arquivos else None
+    )
+    faixa_de_datas = _filtro_datas_dashboard(periodo, inicio, fim)
+    if inicio and fim and arquivos is not None:
+        meses_no_intervalo = {
+            f"{ano:04d}-{mes:02d}"
+            for ano in range(inicio.year, fim.year + 1)
+            for mes in range(1, 13)
+            if (ano, mes) >= (inicio.year, inicio.month)
+            and (ano, mes) <= (fim.year, fim.month)
+        }
+        arquivos = [
+            arquivo for arquivo in arquivos
+            if (periodo_arquivo := periodo_abrangencia_do_arquivo(arquivo))
+            and periodo_arquivo[0] in meses_no_intervalo
+        ]
+    dias_semana = dias_semana or []
+    linhas_selecionadas = linhas or []
 
     def filtro(categoria, data=True):
-        criterio = {"categoria": categoria, "arquivo_origem": {"$in": arquivos}}
+        criterio = {"categoria": categoria}
+        if arquivos is not None:
+            criterio["arquivo_origem"] = {"$in": arquivos}
+        # Sem limites de data, o MongoDB recebe somente categoria e arquivo,
+        # permitindo agregar o conjunto inteiro selecionado.
         if data:
-            criterio["dados_tratados.data"] = faixa_de_datas
+            # Linhas de total sem data não devem ser somadas junto com os dias.
+            criterio_data = {"$type": "string", "$ne": ""}
+            criterio_data.update(faixa_de_datas)
+            criterio["dados_tratados.data"] = criterio_data
         return criterio
 
-    evolucao_bruta = list(colecao.aggregate([
+    pipeline_evolucao = [
         {"$match": filtro("resumo_geral")},
+        *_estagios_dias_semana(dias_semana),
         {"$group": {
             "_id": {"$substrBytes": ["$dados_tratados.data", 0, 10]},
             "viagens_programadas": {"$sum": "$dados_tratados.viagens_programadas"},
@@ -287,7 +377,10 @@ def resumo_dashboard(colecao, periodo, abrangencia):
             "quilometragem_total": {"$sum": "$dados_tratados.km_total"},
         }},
         {"$sort": {"_id": 1}},
-    ]))
+    ]
+    evolucao_bruta = _executar_pipeline_dashboard(
+        colecao, "evolução", pipeline_evolucao,
+    )
     evolucao = [
         {"data": item["_id"],
          "viagens_programadas": item["viagens_programadas"],
@@ -295,25 +388,81 @@ def resumo_dashboard(colecao, periodo, abrangencia):
         for item in evolucao_bruta
     ]
 
-    passageiros = list(colecao.aggregate([
+    pipeline_passageiros = [
         {"$match": {**filtro("passageiros", data=False),
-                    "dados_tratados.mes": periodo,
+                    **({"dados_tratados.mes": periodo} if periodo else {}),
                     "dados_tratados.dia": {"$gt": 0}}},
+        {"$addFields": {"_data_dashboard": {"$dateFromString": {
+            "dateString": {"$concat": [
+                "$dados_tratados.mes", "-",
+                {"$cond": [
+                    {"$lt": [{"$convert": {"input": "$dados_tratados.dia",
+                                             "to": "int", "onError": 0,
+                                             "onNull": 0}}, 10]},
+                    {"$concat": ["0", {"$toString": {"$convert": {
+                        "input": "$dados_tratados.dia", "to": "int",
+                        "onError": 0, "onNull": 0}}}]},
+                    {"$toString": {"$convert": {
+                        "input": "$dados_tratados.dia", "to": "int",
+                        "onError": 0, "onNull": 0}}},
+                ]},
+            ]}, "format": "%Y-%m-%d", "onError": None, "onNull": None,
+        }}}},
+        {"$match": {"_data_dashboard": {"$ne": None}}},
+    ]
+    if faixa_de_datas:
+        pipeline_passageiros.append({"$match": {"_data_dashboard": {
+            "$gte": datetime.combine(
+                date.fromisoformat(faixa_de_datas["$gte"]), datetime.min.time()
+            ),
+            "$lt": datetime.combine(
+                date.fromisoformat(faixa_de_datas["$lt"]), datetime.min.time()
+            ),
+        }}})
+    if dias_semana:
+        pipeline_passageiros.append({"$match": {"$expr": {"$in": [
+            {"$dayOfWeek": "$_data_dashboard"},
+            sorted({(dia % 7) + 1 for dia in dias_semana}),
+        ]}}})
+    pipeline_passageiros.append(
         {"$group": {"_id": None, "total": {"$sum": {"$convert": {
             "input": {"$replaceAll": {
                 "input": "$dados_originais.Total Passageiros",
                 "find": ".", "replacement": "",
             }},
             "to": "long", "onError": 0, "onNull": 0,
-        }}}}},
-    ]))
+        }}}}}
+    )
+    passageiros = _executar_pipeline_dashboard(
+        colecao, "passageiros", pipeline_passageiros,
+    )
 
-    faixas_brutas = list(colecao.aggregate([
-        {"$match": {**filtro("resumo_fxhr"),
-                    "dados_tratados.faixa_horaria": {"$type": "string", "$ne": ""}}},
+    categoria_fx = "fxhr" if linhas_selecionadas else "resumo_fxhr"
+    match_fx = {
+        **filtro(categoria_fx),
+        "dados_tratados.faixa_horaria": {"$type": "string", "$ne": ""},
+    }
+    if linhas_selecionadas:
+        match_fx["$and"] = [
+            {"dados_tratados.linha": {"$type": "string", "$ne": ""}},
+            {"dados_tratados.linha": {"$in": linhas_selecionadas}},
+        ]
+    pipeline_fx = [
+        {"$match": match_fx},
+        *_estagios_dias_semana(dias_semana),
+        _estagio_hora_dashboard(),
+    ]
+    if hora_inicio is not None:
+        pipeline_fx.append({"$match": {"_hora_dashboard": {"$gte": hora_inicio}}})
+    if hora_fim is not None:
+        pipeline_fx.append({"$match": {"_hora_dashboard": {"$lte": hora_fim}}})
+    pipeline_fx.extend([
         {"$group": {"_id": "$dados_tratados.faixa_horaria",
                     "numero_viagens": {"$sum": "$dados_tratados.numero_viagens"}}},
-    ]))
+    ])
+    faixas_brutas = _executar_pipeline_dashboard(
+        colecao, "faixas horárias", pipeline_fx,
+    )
     faixas = [
         {"faixa_horaria": item["_id"], "numero_viagens": item["numero_viagens"]}
         for item in sorted(
@@ -323,34 +472,92 @@ def resumo_dashboard(colecao, periodo, abrangencia):
         )
     ]
 
-    linhas_brutas = list(colecao.aggregate([
-        {"$match": {**filtro("linhas"),
-                    "dados_tratados.linha": {"$type": "string", "$ne": ""}}},
-        {"$group": {"_id": "$dados_tratados.linha",
-                    "numero_viagens": {"$sum": "$dados_tratados.numero_viagens"}}},
+    categoria_linhas = "fxhr" if hora_inicio is not None else "linhas"
+    match_linhas = filtro(categoria_linhas)
+    condicoes_linha = [
+        {"dados_tratados.linha": {"$type": "string", "$ne": ""}},
+    ]
+    if linhas_selecionadas:
+        condicoes_linha.append(
+            {"dados_tratados.linha": {"$in": linhas_selecionadas}}
+        )
+    match_linhas["$and"] = condicoes_linha
+    if categoria_linhas == "fxhr":
+        match_linhas["dados_tratados.faixa_horaria"] = {
+            "$type": "string", "$ne": "",
+        }
+    pipeline_linhas = [
+        {"$match": match_linhas},
+        *_estagios_dias_semana(dias_semana),
+    ]
+    if categoria_linhas == "fxhr":
+        pipeline_linhas.append(_estagio_hora_dashboard())
+        if hora_inicio is not None:
+            pipeline_linhas.append({"$match": {"_hora_dashboard": {"$gte": hora_inicio}}})
+        if hora_fim is not None:
+            pipeline_linhas.append({"$match": {"_hora_dashboard": {"$lte": hora_fim}}})
+    pipeline_linhas.extend([
+        {"$group": {
+            "_id": "$dados_tratados.linha",
+            "numero_viagens": {"$sum": "$dados_tratados.numero_viagens"},
+            "quilometragem_total": {"$sum": "$dados_tratados.quilometragem_total"},
+            "dias": {"$addToSet": {"$substrBytes": ["$dados_tratados.data", 0, 10]}},
+        }},
         {"$sort": {"numero_viagens": -1, "_id": 1}},
-        {"$limit": 8},
-    ]))
+    ])
+    if not linhas_selecionadas:
+        pipeline_linhas.append({"$limit": 8})
+    linhas_brutas = _executar_pipeline_dashboard(
+        colecao, "linhas", pipeline_linhas,
+    )
     linhas = [
         {"linha": item["_id"], "numero_viagens": item["numero_viagens"]}
         for item in linhas_brutas
     ]
+    indicador_por_linha = bool(linhas_selecionadas) and hora_inicio is None
+    indicador_por_horario = hora_inicio is not None
+    indicador_detalhado = indicador_por_linha or indicador_por_horario
+    if indicador_por_horario:
+        viagens_realizadas = sum(item["numero_viagens"] for item in faixas)
+        quilometragem_total = None
+    elif indicador_por_linha:
+        viagens_realizadas = sum(item["numero_viagens"] for item in linhas_brutas)
+        quilometragem_total = round(sum(
+            item.get("quilometragem_total", 0) or 0 for item in linhas_brutas
+        ), 2)
+    else:
+        viagens_realizadas = sum(
+            item["viagens_realizadas"] for item in evolucao_bruta
+        ) if evolucao_bruta else None
+        quilometragem_total = round(sum(
+            item["quilometragem_total"] for item in evolucao_bruta
+        ), 2) if evolucao_bruta else None
+    dias_com_dados = (
+        len({dia for item in linhas_brutas for dia in item.get("dias", [])})
+        if linhas_selecionadas else len(evolucao_bruta)
+    )
 
     return {
-        "periodo": periodo,
+        "periodo": periodo or ("Personalizado" if inicio and fim else "Todos os períodos"),
         "abrangencia": abrangencia,
+        "filtros_aplicados": {
+            "inicio": inicio.isoformat() if inicio else None,
+            "fim": fim.isoformat() if fim else None,
+            "dias_semana": dias_semana,
+            "linhas": linhas_selecionadas,
+            "hora_inicio": hora_inicio,
+            "hora_fim": hora_fim,
+        },
         "indicadores": {
-            "viagens_programadas": sum(
+            "viagens_programadas": None if indicador_detalhado else sum(
                 item["viagens_programadas"] for item in evolucao_bruta
             ) if evolucao_bruta else None,
-            "viagens_realizadas": sum(
-                item["viagens_realizadas"] for item in evolucao_bruta
-            ) if evolucao_bruta else None,
-            "quilometragem_total": round(sum(
-                item["quilometragem_total"] for item in evolucao_bruta
-            ), 2) if evolucao_bruta else None,
-            "total_passageiros": passageiros[0]["total"] if passageiros else None,
-            "dias_com_dados": len(evolucao_bruta),
+            "viagens_realizadas": viagens_realizadas,
+            "quilometragem_total": quilometragem_total,
+            "total_passageiros": None if indicador_detalhado else (
+                passageiros[0]["total"] if passageiros else None
+            ),
+            "dias_com_dados": dias_com_dados,
         },
         "evolucao": evolucao,
         "faixas_horarias": faixas,

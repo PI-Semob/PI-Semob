@@ -307,19 +307,43 @@ def consultar_opcoes_dashboard(
 def consultar_resumo_dashboard(
     periodo: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
     abrangencia: Literal["Mensal", "Quinzenal"] | None = None,
+    inicio: date | None = None,
+    fim: date | None = None,
+    linhas: str | None = None,
+    dias: str | None = None,
+    hora_inicio: int | None = Query(default=None, ge=0, le=23),
+    hora_fim: int | None = Query(default=None, ge=0, le=23),
     _usuario_id: str = Depends(usuario_autenticado),
 ):
     try:
-        if periodo is None or abrangencia is None:
-            opcoes = opcoes_dashboard(colecao_relatorios_mensais)
-            periodo = periodo or opcoes["periodo_padrao"]
-            if abrangencia is None:
-                atual = next((item for item in opcoes["periodos"]
-                              if item["periodo"] == periodo), None)
-                abrangencia = (atual["abrangencias"][0] if atual else None)
-        if periodo is None or abrangencia is None:
-            raise HTTPException(404, "Nenhum relatório disponível")
-        return resumo_dashboard(colecao_relatorios_mensais, periodo, abrangencia)
+        if (inicio is None) != (fim is None):
+            raise HTTPException(400, "Informe as duas datas do intervalo.")
+        if inicio and fim and inicio > fim:
+            raise HTTPException(400, "A data inicial deve ser anterior à data final.")
+        if (hora_inicio is None) != (hora_fim is None):
+            raise HTTPException(400, "Informe o início e o fim da faixa horária.")
+        if hora_inicio is not None and hora_inicio > hora_fim:
+            raise HTTPException(400, "A hora inicial deve ser anterior à hora final.")
+        dias_semana = []
+        if dias:
+            try:
+                dias_semana = sorted({int(dia) for dia in dias.split(",")})
+            except ValueError as erro:
+                raise HTTPException(400, "Dias da semana inválidos.") from erro
+            if any(dia < 1 or dia > 7 for dia in dias_semana):
+                raise HTTPException(400, "Dias da semana devem estar entre 1 e 7.")
+        linhas_selecionadas = sorted({linha.strip() for linha in (linhas or "").split(",") if linha.strip()})
+        intervalo_personalizado = inicio is not None and fim is not None
+        # Nenhum período ou abrangência representa todos os arquivos importados.
+        # A faixa de datas, quando enviada, também pode atravessar vários meses.
+        if intervalo_personalizado:
+            periodo = None
+        return resumo_dashboard(
+            colecao_relatorios_mensais, periodo, abrangencia,
+            inicio=inicio, fim=fim, dias_semana=dias_semana,
+            linhas=linhas_selecionadas, hora_inicio=hora_inicio,
+            hora_fim=hora_fim,
+        )
     except PyMongoError as erro:
         raise HTTPException(503, "Não foi possível consultar o Dashboard") from erro
 
