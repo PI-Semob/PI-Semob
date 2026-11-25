@@ -207,6 +207,37 @@ class RelatoriosService {
     }
   }
 
+  Future<String> analisar(Map<String, dynamic> estatisticas) async {
+    final uri = Uri.parse('$_baseUrl/relatorios/analise-ia');
+    late http.Response resposta;
+    try {
+      resposta = await _client
+          .post(uri, headers: {
+            ..._cabecalhos,
+            'Content-Type': 'application/json; charset=utf-8',
+          }, body: jsonEncode({'estatisticas': estatisticas}))
+          .timeout(const Duration(seconds: 55));
+    } on TimeoutException {
+      throw const RelatoriosException('A análise demorou além do limite.');
+    } on http.ClientException {
+      throw const RelatoriosException('Não foi possível conectar ao servidor.');
+    }
+    Map<String, dynamic> corpo;
+    try {
+      corpo = jsonDecode(utf8.decode(resposta.bodyBytes)) as Map<String, dynamic>;
+    } on FormatException {
+      throw const RelatoriosException('Resposta inválida do servidor.');
+    }
+    if (resposta.statusCode < 200 || resposta.statusCode >= 300) {
+      throw RelatoriosException(_mensagemErro(resposta, corpo));
+    }
+    final analise = corpo['analise'];
+    if (analise is! String || analise.isEmpty) {
+      throw const RelatoriosException('A análise retornada está vazia.');
+    }
+    return analise;
+  }
+
   Future<Uint8List> exportarCsv(
       {String? tipo,
       String? periodo,

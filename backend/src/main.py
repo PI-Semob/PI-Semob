@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 from datetime import date
 from typing import Literal
@@ -119,6 +121,45 @@ class LoginEntrada(BaseModel):
 class AlterarSenhaEntrada(BaseModel):
     senha_atual: str = Field(min_length=1, max_length=128)
     nova_senha: str = Field(min_length=8, max_length=128)
+
+
+class AnaliseRelatoriosEntrada(BaseModel):
+    estatisticas: dict
+
+
+def _gerar_analise_ia(estatisticas):
+    chave = os.getenv("OPENAI_API_KEY")
+    if not chave:
+        raise HTTPException(503, "Análise por IA indisponível: configure OPENAI_API_KEY no backend.")
+    modelo = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    payload = json.dumps({
+        "model": modelo,
+        "messages": [
+            {"role": "system", "content": (
+                "Você é analista de dados de transporte público. Analise apenas os "
+                "indicadores estatísticos já calculados enviados pelo sistema. "
+                "Não invente causas nem recompute totais. Em português claro, "
+                "apresente: resumo, principais tendências, anomalias e limitações "
+                "dos dados. Trate previsões lineares como extrapolações incertas, "
+                "não como garantias. Cite valores e períodos concretos quando existirem. "
+                "Se houver poucos dados, diga isso explicitamente."
+            )},
+            {"role": "user", "content": json.dumps(estatisticas, ensure_ascii=False)},
+        ],
+        "temperature": 0.2,
+    }).encode("utf-8")
+    pedido = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions", data=payload,
+        headers={"Authorization": f"Bearer {chave}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(pedido, timeout=45) as resposta:
+            dados = json.loads(resposta.read().decode("utf-8"))
+        return dados["choices"][0]["message"]["content"]
+    except (urllib.error.URLError, TimeoutError, KeyError, IndexError, ValueError) as erro:
+        logging.getLogger(__name__).exception("Falha ao consultar serviço de análise por IA")
+        raise HTTPException(502, "Não foi possível gerar a análise por IA agora.") from erro
 
 
 class UsuarioResumo(BaseModel):
@@ -351,6 +392,19 @@ def consultar_resumo_relatorios(
                                  granularidade, linha)
     except PyMongoError as erro:
         raise HTTPException(503, "Não foi possível consolidar os relatórios.") from erro
+
+
+@app.post("/relatorios/analise-ia")
+async def analisar_resumo_relatorios(
+    entrada: AnaliseRelatoriosEntrada,
+    _usuario_id: str = Depends(usuario_autenticado),
+):
+    """Gera comentário narrativo sobre estatísticas agregadas calculadas no cliente."""
+    conteudo = json.dumps(entrada.estatisticas, ensure_ascii=False)
+    if len(conteudo) > 30000:
+        raise HTTPException(413, "Resumo estatístico muito extenso para análise.")
+    texto = await asyncio.to_thread(_gerar_analise_ia, entrada.estatisticas)
+    return {"analise": texto, "modelo": os.getenv("OPENAI_MODEL", "gpt-4.1-mini")}
 
 
 @app.get("/relatorios/exportar.csv")
