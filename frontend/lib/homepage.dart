@@ -36,8 +36,10 @@ class _HomePageState extends State<HomePage> {
     setState(() => _revisaoDados++);
   }
 
-  void _abrirSecao(int secao) {
-    Navigator.of(context).pop();
+  void _abrirSecao(int secao, {bool fecharDrawer = false}) {
+    if (fecharDrawer) {
+      Navigator.of(context).pop();
+    }
     if (_secaoAtual == secao) return;
     setState(() {
       _secaoAtual = secao;
@@ -155,14 +157,16 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final largura = MediaQuery.sizeOf(context).width;
+    final desktop = largura >= 860;
     return Scaffold(
       backgroundColor: const Color(0xFFDFE9F5),
-      drawer: Drawer(
+      drawer: desktop ? null : Drawer(
         child: SafeArea(
           child: Column(
             children: [
               _itemMenu(0, Icons.dashboard_outlined, 'Dashboard'),
-              _itemMenu(1, Icons.directions_bus_outlined, 'Operação'),
+              _itemMenu(1, Icons.directions_bus_outlined, 'Importação'),
               _itemMenu(2, Icons.analytics_outlined, 'Relatórios'),
             ],
           ),
@@ -171,7 +175,7 @@ class _HomePageState extends State<HomePage> {
       body: SafeArea(
         child: Column(
           children: [
-            _cabecalho(),
+            _cabecalho(desktop),
             Expanded(
               child: IndexedStack(
                 index: _secaoAtual,
@@ -203,103 +207,176 @@ class _HomePageState extends State<HomePage> {
   Widget _itemMenu(int indice, IconData icone, String titulo) {
     return ListTile(
       leading: Icon(icone),
-      title: Text(titulo),
+      title: Text(titulo, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+      iconColor: const Color(0xFF173F68),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+      minVerticalPadding: 14,
+      visualDensity: const VisualDensity(vertical: 1),
       selected: _secaoAtual == indice,
       selectedTileColor: const Color(0xFFE2F2FF),
       selectedColor: const Color(0xFF173F68),
-      onTap: () => _abrirSecao(indice),
+      onTap: () => _abrirSecao(indice, fecharDrawer: true),
     );
   }
 
-  Widget _cabecalho() {
+  Widget _cabecalho(bool desktop) {
     return Container(
       width: double.infinity,
       color: const Color(0xFF173F68),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Builder(
-                builder: (context) {
-                  return IconButton(
-                    onPressed: () {
-                      Scaffold.of(context).openDrawer();
-                    },
-                    icon: const Icon(
-                      Icons.menu,
-                      color: Colors.white,
-                      size: 28,
-                    ),
-                  );
-                },
-              ),
-              const SizedBox(width: 2),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'SEMOB',
-                      style: TextStyle(
-                        fontSize: 19,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                        letterSpacing: 1,
-                      ),
-                    ),
-                    SizedBox(height: 3),
-                    Text(
-                      'Mobilidade Urbana',
-                      maxLines: 2,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFFB8CCE0),
-                        height: 1.2,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              PopupMenuButton<String>(
-                tooltip: 'Opções da conta',
-                onSelected: (opcao) {
-                  if (opcao == 'senha') _alterarSenha();
-                  if (opcao == 'sair') _sair();
-                },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(
-                    value: 'senha',
-                    child: ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.lock_outline),
-                      title: Text('Alterar Senha'),
+      padding: EdgeInsets.symmetric(
+        horizontal: desktop ? 32 : 12,
+        vertical: desktop ? 8 : 10,
+      ),
+      child: desktop
+          ? SizedBox(
+              height: 104,
+              child: Stack(
+                children: [
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Image.asset('assets/images/logo.png', width: 56, height: 56, fit: BoxFit.contain),
+                        const SizedBox(width: 12),
+                        const Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('SEMOB', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold, color: Colors.white, letterSpacing: 1)),
+                            SizedBox(height: 3),
+                            Text('Mobilidade Urbana', style: TextStyle(fontSize: 12, color: Color(0xFFB8CCE0))),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
-                  PopupMenuItem(
-                    value: 'sair',
-                    child: ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.logout),
-                      title: Text('Sair (Logout)'),
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    child: _menuConta(true),
+                  ),
+                  Align(
+                    alignment: Alignment.bottomCenter,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _topico(0, Icons.dashboard_outlined, 'Dashboard', desktop: true),
+                        const SizedBox(width: 10),
+                        _topico(1, Icons.directions_bus_outlined, 'Importação', desktop: true),
+                        const SizedBox(width: 10),
+                        _topico(2, Icons.analytics_outlined, 'Relatórios', desktop: true),
+                      ],
                     ),
                   ),
                 ],
-                child: const CircleAvatar(
-                  radius: 21,
-                  backgroundColor: Colors.white,
-                  child: Icon(
-                    Icons.person_outline,
-                    color: Color(0xFF1976B9),
-                    size: 24,
+              ),
+            )
+          : Row(
+              children: [
+                Builder(
+                  builder: (context) => IconButton(
+                    tooltip: 'Abrir menu',
+                    onPressed: () => Scaffold.of(context).openDrawer(),
+                    icon: const Icon(Icons.menu, color: Colors.white, size: 26),
                   ),
                 ),
-              ),
-            ],
+                const SizedBox(width: 4),
+                SizedBox(
+                  height: 48,
+                  child: Image.asset(
+                    'assets/images/logo.png',
+                    width: 48,
+                    fit: BoxFit.contain,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('SEMOB', style: TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      letterSpacing: 1,
+                    )),
+                    SizedBox(height: 3),
+                    Text('Mobilidade Urbana', style: TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFFB8CCE0),
+                    )),
+                  ],
+                ),
+                const Spacer(),
+                _menuConta(false),
+              ],
+            ),
+    );
+  }
+
+  Widget _menuConta(bool desktop) {
+    return PopupMenuButton<String>(
+      tooltip: 'Opções da conta',
+      onSelected: (opcao) {
+        if (opcao == 'senha') _alterarSenha();
+        if (opcao == 'sair') _sair();
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem(
+          value: 'senha',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.lock_outline),
+            title: Text('Alterar Senha'),
           ),
-        ],
+        ),
+        PopupMenuItem(
+          value: 'sair',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.logout),
+            title: Text('Sair (Logout)'),
+          ),
+        ),
+      ],
+      child: SizedBox(
+        width: desktop ? 56 : 48,
+        height: desktop ? 56 : 48,
+        child: CircleAvatar(
+          backgroundColor: Colors.white,
+          child: const Icon(Icons.person_outline,
+              color: Color(0xFF1976B9), size: 23),
+        ),
       ),
+    );
+  }
+
+  Widget _topico(
+    int indice,
+    IconData icone,
+    String titulo, {
+    bool desktop = false,
+  }) {
+    final ativo = _secaoAtual == indice;
+    return TextButton.icon(
+      onPressed: () => _abrirSecao(indice),
+      style: TextButton.styleFrom(
+        foregroundColor: ativo ? Colors.white : const Color(0xFFCFDDEC),
+        backgroundColor:
+            ativo ? Colors.white.withValues(alpha: 0.14) : Colors.transparent,
+        padding: EdgeInsets.symmetric(
+          horizontal: desktop ? 24 : 20,
+          vertical: desktop ? 16 : 15,
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+      icon: Icon(icone, size: desktop ? 25 : 22),
+      label: Text(titulo, style: TextStyle(
+        fontSize: desktop ? 18 : 16,
+        fontWeight: ativo ? FontWeight.w700 : FontWeight.w500,
+      )),
     );
   }
 }

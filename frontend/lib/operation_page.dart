@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:cross_file/cross_file.dart';
+import 'package:crypto/crypto.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -22,9 +24,10 @@ class _OperationPageState extends State<OperationPage> {
   bool _arrastando = false;
   bool _importando = false;
   double? _progresso;
+  String? _status;
   String? _erro;
-  String? _nomeArquivo;
-  ResultadoImportacao? _resultado;
+  bool _concluido = false;
+  String? _ultimoZip;
 
   @override
   void initState() {
@@ -84,11 +87,32 @@ class _OperationPageState extends State<OperationPage> {
     await for (final bloco in conteudo) {
       enviados += bloco.length;
       if (mounted) {
-        setState(() => _progresso = enviados / tamanho);
+        setState(() {
+          _progresso = 0.1 + enviados / tamanho * 0.2;
+          _status = 'Enviando arquivo ZIP...';
+        });
       }
       yield bloco;
     }
-    if (mounted) setState(() => _progresso = null);
+    if (mounted) setState(() => _status = 'Conferindo o arquivo no servidor...');
+  }
+
+  Future<Uint8List> _lerArquivo(Stream<List<int>> conteudo, int tamanho) async {
+    final bytes = BytesBuilder(copy: false);
+    var lidos = 0;
+
+    await for (final bloco in conteudo) {
+      bytes.add(bloco);
+      lidos += bloco.length;
+      if (mounted) {
+        setState(() {
+          _progresso = lidos / tamanho * 0.1;
+          _status = 'Lendo arquivo ZIP...';
+        });
+      }
+    }
+
+    return bytes.takeBytes();
   }
 
   Future<void> _importar(
@@ -105,23 +129,53 @@ class _OperationPageState extends State<OperationPage> {
     setState(() {
       _importando = true;
       _progresso = 0;
+      _status = 'Lendo arquivo ZIP...';
       _erro = null;
-      _resultado = null;
-      _nomeArquivo = nome;
+      _concluido = false;
     });
     try {
+      final bytes = await _lerArquivo(conteudo, tamanho);
+      final hash = sha256.convert(bytes).toString();
+      if (hash == _ultimoZip) {
+        if (mounted) {
+          setState(() => _erro = 'Este arquivo já foi importado no sistema!');
+        }
+        return;
+      }
+
+      if (mounted) setState(() {
+        _progresso = 0.3;
+        _status = 'Conferindo o arquivo no servidor...';
+      });
       final resultado = await _servico.importar(
         nome: nome,
-        tamanho: tamanho,
-        conteudo: _acompanharEnvio(conteudo, tamanho),
+        tamanho: bytes.length,
+        conteudo: _acompanharEnvio(Stream.value(bytes), bytes.length),
+        onProgresso: (mensagem, progresso) {
+          if (!mounted) return;
+          setState(() {
+            _status = mensagem;
+            _progresso = 0.3 + progresso / 100 * 0.7;
+          });
+        },
       );
       if (mounted) {
-        setState(() => _resultado = resultado);
+        setState(() {
+          _concluido = true;
+          _ultimoZip = hash;
+        });
         if (resultado.inseridos > 0) widget.onDataImported?.call();
       }
     } on ImportacaoException catch (erro) {
       if (mounted) {
         setState(() => _erro = erro.mensagem);
+        if (erro.statusCode == 409) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Este arquivo já foi importado no sistema!'),
+            ),
+          );
+        }
         if (erro.inseridosParcial > 0) widget.onDataImported?.call();
       }
     } catch (_) {
@@ -133,6 +187,7 @@ class _OperationPageState extends State<OperationPage> {
         setState(() {
           _importando = false;
           _progresso = null;
+          _status = null;
         });
       }
     }
@@ -250,15 +305,14 @@ class _OperationPageState extends State<OperationPage> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                if (_importando) ...[
-                  Text(
-                    _progresso == null
-                        ? 'Processando $_nomeArquivo e salvando no MongoDB...'
-                        : 'Enviando $_nomeArquivo: ${(_progresso! * 100).round()}%',
-                    style: const TextStyle(color: Color(0xFF172554)),
+                if (_importando || _concluido) ...[
+                  if (_status != null) ...[
+                    Text(_status!, style: const TextStyle(color: Color(0xFF334155))),
+                    const SizedBox(height: 8),
+                  ],
+                  LinearProgressIndicator(
+                    value: _concluido ? 1 : _progresso,
                   ),
-                  const SizedBox(height: 10),
-                  LinearProgressIndicator(value: _progresso),
                   const SizedBox(height: 18),
                 ],
                 if (_erro != null) ...[
@@ -266,7 +320,6 @@ class _OperationPageState extends State<OperationPage> {
                       style: const TextStyle(color: Color(0xFFB42318))),
                   const SizedBox(height: 18),
                 ],
-                if (_resultado != null) _painelResultado(_resultado!),
               ],
             ),
           ),
@@ -275,44 +328,6 @@ class _OperationPageState extends State<OperationPage> {
     );
   }
 
-  Widget _painelResultado(ResultadoImportacao resultado) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Importação de ${resultado.arquivo}',
-                style:
-                    const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Text('Arquivos processados: ${resultado.arquivosProcessados} · '
-                'Arquivos rejeitados: ${resultado.arquivosRejeitados}'),
-            Text('Registros inseridos: ${resultado.inseridos} · '
-                'Ignorados por duplicidade: ${resultado.ignorados} · '
-                'Rejeitados: ${resultado.rejeitados}'),
-            const SizedBox(height: 8),
-            ExpansionTile(
-              title: const Text('Detalhes por arquivo'),
-              children: resultado.detalhes.map((detalhe) {
-                final avisos =
-                    (detalhe['avisos'] as List<dynamic>? ?? []).join('; ');
-                return ListTile(
-                  title: Text(detalhe['arquivo'] as String? ?? ''),
-                  subtitle: Text(
-                    '${detalhe['categoria']}: ${detalhe['inseridos']} inseridos, '
-                    '${detalhe['ignorados']} ignorados, '
-                    '${detalhe['rejeitados']} rejeitados'
-                    '${avisos.isEmpty ? '' : '\n$avisos'}',
-                  ),
-                );
-              }).toList(),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 class DashedBorderPainter extends CustomPainter {
