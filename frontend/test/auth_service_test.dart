@@ -24,6 +24,7 @@ void main() {
       return http.Response(
         jsonEncode({
           'mensagem': 'Login realizado com sucesso',
+          'access_token': 'token-de-teste',
           'usuario': {
             'id': 'abc',
             'nome': 'Teste',
@@ -52,6 +53,7 @@ void main() {
       client: MockClient((_) async => http.Response.bytes(
             utf8.encode(jsonEncode({
               'mensagem': 'Login realizado com sucesso',
+              'access_token': 'token-de-teste',
               'usuario': {
                 'id': 'abc',
                 'nome': 'Usuária Teste',

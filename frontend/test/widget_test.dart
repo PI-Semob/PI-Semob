@@ -44,6 +44,7 @@ void main() {
     final cliente = MockClient((_) async => http.Response(
           jsonEncode({
             'mensagem': 'Login realizado com sucesso',
+            'access_token': 'token-de-teste',
             'usuario': {
               'id': 'abc',
               'nome': 'Teste',

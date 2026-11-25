@@ -11,9 +11,11 @@ dependencies:
     sdk: flutter
   http: ^1.6.0
   cross_file: ^0.3.4+2
+  crypto: ^3.0.6
   desktop_drop: ^0.6.1
   file_picker: ^10.3.10
   fl_chart: ^1.2.0
+  shared_preferences: ^2.5.3
 
 dev_dependencies:
   flutter_test:

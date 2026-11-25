@@ -9,6 +9,7 @@ from pymongo.errors import PyMongoError
 
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
 os.environ.setdefault("DB_NAME", "semob_test")
+os.environ.setdefault("TOKEN_SECRET", "segredo-de-teste-nao-usar-em-producao")
 
 CAMINHO_SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(CAMINHO_SRC))
@@ -102,6 +103,8 @@ class TesteAutenticacao(unittest.TestCase):
         self.assertEqual(resposta.json()["mensagem"], "Login realizado com sucesso")
         self.assertEqual(resposta.json()["usuario"]["nome"], "Rafael Palumbo")
         self.assertEqual(resposta.json()["usuario"]["email"], "rafa@email.com")
+        self.assertTrue(resposta.json()["access_token"])
+        self.assertEqual(resposta.json()["token_type"], "bearer")
         self.assertNotIn("senha", resposta.text)
 
     def test_d_login_com_senha_incorreta_retorna_401(self):
