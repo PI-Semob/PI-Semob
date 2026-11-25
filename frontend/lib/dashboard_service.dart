@@ -24,11 +24,13 @@ class PeriodoOpcao {
 class DashboardOpcoes {
   const DashboardOpcoes({
     required this.periodos,
+    required this.linhas,
     required this.periodoPadrao,
     required this.abrangenciaPadrao,
   });
 
   final List<PeriodoOpcao> periodos;
+  final List<String> linhas;
   final String? periodoPadrao;
   final String? abrangenciaPadrao;
 }
@@ -86,7 +88,7 @@ class DashboardResumo {
   });
 
   final String periodo;
-  final String abrangencia;
+  final String? abrangencia;
   final DashboardIndicadores indicadores;
   final List<EvolucaoPonto> evolucao;
   final List<FaixaHorariaResumo> faixasHorarias;
@@ -115,6 +117,7 @@ class DashboardService {
       }).toList();
       return DashboardOpcoes(
         periodos: periodos,
+        linhas: _lista(corpo['linhas'] ?? const []).map(_texto).toList(),
         periodoPadrao: corpo['periodo_padrao'] as String?,
         abrangenciaPadrao: corpo['abrangencia_padrao'] as String?,
       );
@@ -124,18 +127,35 @@ class DashboardService {
   }
 
   Future<DashboardResumo> buscarResumo({
-    required String periodo,
-    required String abrangencia,
+    String? periodo,
+    String? abrangencia,
+    DateTime? inicio,
+    DateTime? fim,
+    List<String> linhas = const [],
+    List<int> diasSemana = const [],
+    int? horaInicio,
+    int? horaFim,
   }) async {
-    final corpo = await _get('/dashboard/resumo', {
-      'periodo': periodo,
-      'abrangencia': abrangencia,
-    });
+    String data(DateTime valor) =>
+        '${valor.year.toString().padLeft(4, '0')}-${valor.month.toString().padLeft(2, '0')}-${valor.day.toString().padLeft(2, '0')}';
+    final parametros = <String, String>{
+      if (abrangencia != null) 'abrangencia': abrangencia,
+      if (periodo != null) 'periodo': periodo,
+      if (inicio != null && fim != null) 'inicio': data(inicio),
+      if (inicio != null && fim != null) 'fim': data(fim),
+      if (linhas.isNotEmpty) 'linhas': linhas.join(','),
+      if (diasSemana.isNotEmpty) 'dias': diasSemana.join(','),
+      if (horaInicio != null && horaFim != null) 'hora_inicio': '$horaInicio',
+      if (horaInicio != null && horaFim != null) 'hora_fim': '$horaFim',
+    };
+    final corpo = await _get('/dashboard/resumo', parametros);
     try {
       final indicadores = _mapa(corpo['indicadores']);
       return DashboardResumo(
         periodo: _texto(corpo['periodo']),
-        abrangencia: _texto(corpo['abrangencia']),
+        abrangencia: corpo['abrangencia'] == null
+            ? null
+            : _texto(corpo['abrangencia']),
         indicadores: DashboardIndicadores(
           viagensProgramadas:
               _numeroOpcional(indicadores['viagens_programadas'])?.toInt(),
